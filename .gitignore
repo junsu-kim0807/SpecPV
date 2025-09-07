@@ -1,0 +1,42 @@
+# Python 编译文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info
+
+# 虚拟环境
+venv/
+.env
+.venv
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 构建产物
+sparsesd.egg-info/
+*.dist-info/
+__init__.cpython-*.pyc
+
+# 配置文件（如果有敏感信息）
+# configs/
+
+# 其他临时文件
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+
+# 依赖缓存
+.pytest_cache/
+.tox/
+
+# 如果有使用 GPU 配置文件，确认是否包含敏感信息后决定是否忽略
+# configs/multi_gpu.yaml

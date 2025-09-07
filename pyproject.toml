@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]  # Use PEP621
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sparsesd"
+dynamic = ["version"]
+description = "Sparse Speculative Decoding for Efficient Long-Context Generation"
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+license = { text = "MIT" }  
+authors = [{ name = "Zhendong Tan" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+
+dependencies = [
+  "transformers==4.53.2",
+  "trl==0.19.1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "ruff>=0.5",
+  "black>=24.3",
+  "isort>=5.13",
+]
+
+[project.urls]
+Homepage = "https://example.com/sparsesd"
+Repository = "https://github.com/TanZhendong/SparseSD.git"
+
+[tool.setuptools.packages.find]
+include = ["sparsesd*"]
+exclude = ["tests*","examples*"]
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "no-local-version"
+fallback_version = "0.1.0"
