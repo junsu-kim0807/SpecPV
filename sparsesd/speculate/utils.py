@@ -3,8 +3,9 @@ import random
 import time
 # typing
 from typing import List, Tuple
-
 import torch
+from functools import wraps
+from collections import defaultdict
 
 TOPK = 10  # topk for sparse tree
 
@@ -26,6 +27,27 @@ class Timer:
         elapsed = time.perf_counter() - self.start
         print(f"{self.name} took {elapsed} seconds")
 
+_time_records = defaultdict(list)
+def record_time(name):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            result = func(*args, **kwargs)
+            torch.cuda.synchronize()
+            elapsed = time.perf_counter() - start
+            _time_records[name].append(elapsed)
+            return result
+        return wrapper
+    return decorator
+
+def print_time_stats():
+    for name, times in _time_records.items():
+        avg = sum(times) / len(times)
+        print(f"{name}: called {len(times)} times, avg {avg:.6f}s, min {min(times):.6f}s, max {max(times):.6f}s")
+def reset_time_stats():
+    _time_records.clear()
 
 def prepare_logits_processor(
     temperature: float = 0.0,
@@ -299,7 +321,7 @@ def generate_candidates(
     tree_candidates = tree_candidates.unsqueeze(0)
     return cart_candidates, tree_candidates
 
-
+@record_time("verify")
 def tree_decoding(
     model,
     tree_candidates,

@@ -801,6 +801,8 @@ class DraftAdapter(nn.Module):
     def reset_kv(self):
         self.stable_kv = None
 
+    from .utils import record_time
+    @record_time("draft")
     @torch.no_grad()
     def tree_draft(self, hidden_states, input_ids, head, logits_processor):
         input_ids = input_ids.to(hidden_states.device)
