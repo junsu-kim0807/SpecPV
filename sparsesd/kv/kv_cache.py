@@ -1,164 +1,150 @@
 import torch
+from typing import Any, Dict, List, Optional, Tuple
+from transformers.cache_utils import StaticCache, OffloadedStaticCache
+from dataclasses import dataclass
 
-
-class KVCache:
+class Cache:
     """
-    A key-value cache for the model.
-
-    This class provides a mechanism to maintain a growing cache of keys and values,
-    particularly useful for models that benefit from caching previous states,
-    like transformers during autoregressive decoding.
-
-    Attributes:
-        data (torch.Tensor): The tensor storing keys and values.
-        current_length (int): Current length of the data being stored.
+    Base, abstract class for all caches. The actual data structure is specific to each subclass.
     """
 
-    def __init__(self, data, current_length):
-        """
-        Initialize the KVCache.
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError("Make sure to implement `update` in a subclass.")
 
-        Args:
-            data (torch.Tensor): Initial tensor to store the keys and values.
-            current_length (int): Initial length of the data.
-        """
-        self.data = data
-        self.current_length = current_length
+
+@dataclass
+class CacheConfig:
+    block_size: int = 16              
+    n_sink_blocks: int = 4             
+    n_retrieval_blocks: int = 256      
+    n_buffer_blocks: int = 4         
+    n_spec_tokens_buf: int = 100       
+    max_batch_size: int = 1            
 
     @property
-    def shape(self):
-        """Return the shape of the data tensor with updated length."""
-        return (
-            self.data.shape[0],
-            self.data.shape[1],
-            self.current_length.item(),
-            self.data.shape[3],
-        )
+    def sink_size(self) -> int:
+        return self.n_sink_blocks * self.block_size
 
-    def copy(self, indices: torch.Tensor, prev_length: int, dim: int = 2):
+    @property
+    def retrieval_size(self) -> int:
+        return self.n_retrieval_blocks * self.block_size
+    
+    @property
+    def buffer_size(self) -> int:
+        return self.n_buffer_blocks * self.block_size
+
+    @property
+    def total_budget(self) -> int:
+        return self.sink_size + self.retrieval_size + self.buffer_size + self.n_spec_tokens_buf
+
+
+class PartialKVCache(Cache):
+    def __init__(self, cache_config, model_config, device="cuda", dtype=torch.bfloat16):
+        super().__init__()
+        # config
+        self.cache_config = cache_config
+        self.model_config = model_config
+        self.dtype = dtype
+        self.num_layers = model_config.num_hidden_layers
+        self.num_kv_heads = getattr(model_config, "num_key_value_heads", model_config.num_attention_heads)
+        self.head_dim = getattr(model_config, "head_dim", model_config.hidden_size // model_config.num_attention_heads)
+
+        self.key_cache: list[dict[str, torch.Tensor]] = []
+        self.value_cache: list[dict[str, torch.Tensor]] = []
+        self.verified_lens = []
+        self.current_lens = []
+
+        # build per-layer cache
+        for _ in range(self.num_layers):
+            # allocate one big tensor [batch, heads, total_budget, head_dim]
+            total_budget = (
+                cache_config.sink_size
+                + cache_config.retrieval_size
+                + cache_config.buffer_size
+            )
+            cache_shape = (cache_config.max_batch_size, self.num_kv_heads, total_budget, self.head_dim)
+
+            key_storage = torch.zeros(cache_shape, dtype=dtype, device=device)
+            value_storage = torch.zeros(cache_shape, dtype=dtype, device=device)
+
+            # offsets
+            offset = 0
+            sink_slice = slice(offset, offset + cache_config.sink_size); offset += cache_config.sink_size
+            retri_slice = slice(offset, offset + cache_config.retrieval_size); offset += cache_config.retrieval_size
+            buffer_slice = slice(offset, offset + cache_config.buffer_size)
+
+            # record partitions
+            self.key_cache.append({
+                "sink": key_storage[:, :, sink_slice, :],
+                "retrieval": key_storage[:, :, retri_slice, :],
+                "buffer": key_storage[:, :, buffer_slice, :],
+                # no spec anymore
+            })
+            self.value_cache.append({
+                "sink": value_storage[:, :, sink_slice, :],
+                "retrieval": value_storage[:, :, retri_slice, :],
+                "buffer": value_storage[:, :, buffer_slice, :],
+            })
+            self.verified_lens.append(0)
+            self.current_lens.append(0)
+
+    def summary_key_states(self):
+        pass
+
+    def add_to_sink(self, kv_blocks):
+        pass
+
+    def refresh_retrieval(self, query, full_cache_index):
+        pass
+
+    def update(self, new_tokens_kv):
         """
-        Copy values from the current data at specified indices to a new location.
-
-        Args:
-            indices (torch.Tensor): Indices of the data tensor to be copied.
-            prev_length (int): Previous length before adding new data.
-            dim (int, optional): Dimension along which copying should be performed. Default is 2.
+        Append new generated tokens' KV into the spec buffer.
+        Return the active KV subset (sink + retrieval + buffer + spec_buffer)
+        to be used for inference in the next step.
         """
-        tgt = self.data.index_select(dim, indices)
-        dst = self.data.narrow(dim, prev_length, tgt.shape[dim])
-        dst.copy_(tgt, non_blocking=True)
-        self.current_length.fill_(prev_length + tgt.shape[dim])
+        pass
 
-    def cat(self, tensor: torch.Tensor, dim: int = 2):
+    def spec_update(self, candidate_tokens_kv):
         """
-        Concatenate the given tensor with the current data.
-
-        Args:
-            tensor (torch.Tensor): The tensor to be concatenated.
-            dim (int, optional): The dimension along which concatenation should be done. Default is 2.
-
-        Returns:
-            torch.Tensor: The data tensor after concatenation up to the current length.
+        After partial verification, resolve candidate KV entries:
+        - Accepted tokens are committed into the buffer partition.
+        - Rejected tokens are discarded.
         """
-        dst = self.data.narrow(dim, self.current_length, tensor.shape[dim])
-        dst.copy_(tensor)
-        self.current_length.add_(tensor.shape[dim])
-        return torch.narrow(self.data, 2, 0, self.current_length)
+        pass
+
+    def get_seq_length():
+        pass
+
+    def clear(self):
+        pass
 
 
-def initialize_past_key_values(model, max_length=2200):
-    """
-    Initialize past key and value states for a given transformer model.
-
-    This function prepares key-value cache structures for the model, allowing it to store and reuse
-    past key and value states during autoregressive decoding, which can improve efficiency.
-
-    Args:
-        model (nn.Module): The transformer model for which past key-value states need to be initialized.
-
-    Returns:
-        tuple:
-            - past_key_values (list): A list of KVCache objects for each layer in the model.
-            - past_key_values_data (torch.Tensor): The tensor that will store all keys and values.
-            - current_length_data (torch.Tensor): A tensor tracking the current length of keys/values in the cache.
-    """
-    # Extracting configuration from the model
+# from pytorch_memlab import profile
+# @profile
+def initialize_past_key_values(model, draft_model, max_length=8192, offloading=True):
     config = model.config
-    # Initializing the batch size to 1, this can be modified if different batch sizes are required
-    batch_size = 1
-    # Initializing a tensor to store past keys and values for all layers
-
-    devices = []
-    for i in range(config.num_hidden_layers):
-        try:
-            device = model.model.layers[i].self_attn.q_proj.weight.device
-        except:
-            device = model.layers[i].self_attn.q_proj.weight.device
-        devices.append(device)
-    past_key_values_data_list = []
-    startnum = 0
-    startdevice = devices[0]
-    for id, i in enumerate(devices):
-        if startdevice != i:
-            past_key_values_data = torch.zeros(
-                startnum * 2,
-                batch_size,
-                config.num_key_value_heads,
-                max_length,
-                config.hidden_size // config.num_attention_heads,
-                device=startdevice,
-                dtype=model.dtype,
-            )
-            past_key_values_data_list.append(past_key_values_data)
-            startdevice = i
-            startnum = 0
-        startnum += 1
-    past_key_values_data = torch.zeros(
-        startnum * 2,
-        batch_size,
-        config.num_key_value_heads,
-        max_length,
-        config.hidden_size // config.num_attention_heads,
-        device=startdevice,
-        dtype=model.dtype,
+    
+    # init full kv cache
+    full_past_key_values = StaticCache(
+        config=config,
+        max_cache_len=max_length,
+        offloading=offloading
     )
-    past_key_values_data_list.append(past_key_values_data)
-    # Initialize tensor to store the current length of the cached data for all layers.
-    # [IMPORTANT] It needs to be kept on CPU for quick access and updates.
-    current_length_data = torch.zeros(
-        config.num_hidden_layers * 2, dtype=torch.long, device="cpu"
-    )
-    # Creating a KVCache for each pair of key and value in all layers
-    past_key_values = [] * config.num_hidden_layers
+    
+    # init partial kv cache
+    partial_cache_config = CacheConfig()
+    partial_past_key_values = PartialKVCache(cache_config=partial_cache_config, model_config=config, dtype=model.dtype)
 
-    bias = 0
-    start_data_m = devices[0].index
-    for i in range(config.num_hidden_layers):
-        data_m = devices[i].index
-        if data_m != start_data_m:
-            bias = 0
-            start_data_m = data_m
-        try:
-            past_key_values.append(
-                [
-                    KVCache(
-                        past_key_values_data_list[data_m - devices[0].index][
-                            2 * bias + j
-                        ],
-                        current_length_data[i * 2 + j],
-                    )
-                    for j in range(2)
-                ]
-            )
-        except:
-            past_key_values.append(
-                [
-                    KVCache(
-                        past_key_values_data_list[0][2 * bias + j],
-                        current_length_data[i * 2 + j],
-                    )
-                    for j in range(2)
-                ]
-            )
-        bias += 1
-    return past_key_values, past_key_values_data_list, current_length_data
+    # init draft kv cache
+    draft_past_key_values = StaticCache(
+        config=draft_model.config,
+        max_cache_len=max_length,
+    )
+
+    return full_past_key_values, partial_past_key_values, draft_past_key_values

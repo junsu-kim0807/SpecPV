@@ -18,11 +18,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch LLaMA model."""
-import torch
 import math
 import os
 from typing import List, Optional, Tuple
 
+import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from huggingface_hub import hf_hub_download
@@ -262,7 +262,7 @@ class LlamaAttention(nn.Module):
         self.o_proj = nn.Linear(
             self.num_heads * self.head_dim, self.hidden_size, bias=False
         )
-        self._init_rope()
+        self._init_rope() # TODO: Long-Context scaling
 
     def _init_rope(self):
         if self.config.rope_scaling is None:
@@ -307,7 +307,7 @@ class LlamaAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
@@ -357,18 +357,19 @@ class LlamaAttention(nn.Module):
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[-2]
+            kv_seq_len += past_key_value.get_seq_length()
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(
             query_states, key_states, cos, sin, position_ids
         )
 
         if past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-        past_key_value = (key_states, value_states) if use_cache else None
+            # cache_position needed for the static cache
+            cache_kwargs = {"cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, 0, cache_kwargs) # only one layer
+            valid_len = int(cache_position.max().item()) + 1
+            key_states = key_states[:, :, :valid_len, :]
+            value_states = value_states[:, :, :valid_len, :]
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -422,10 +423,7 @@ class LlamaAttention(nn.Module):
         else:
             attn_output = self.o_proj(attn_output)
 
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
+        return attn_output 
 
 
 class LlamaMLP(nn.Module):
@@ -513,7 +511,7 @@ class LlamaDecoderLayeremb(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = False,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
@@ -542,12 +540,12 @@ class LlamaDecoderLayeremb(nn.Module):
         # cache_hidden.append(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
-            output_attentions=output_attentions,
+            cache_position=cache_position,
             use_cache=use_cache,
         )
         hidden_states = residual + hidden_states
@@ -557,16 +555,7 @@ class LlamaDecoderLayeremb(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (self_attn_weights,)
-
-        if use_cache:
-            outputs += (present_key_value,)
-
-        return outputs
+        return hidden_states
 
 
 @torch.no_grad()
@@ -609,6 +598,7 @@ class DraftAdapter(nn.Module):
         )
         if load_emb and not hasattr(config, "target_hidden_size"):
             import json
+
             from safetensors import safe_open
 
             try:
@@ -647,10 +637,7 @@ class DraftAdapter(nn.Module):
         self.total_tokens = total_tokens - 1
         self.depth = depth
         self.threshold = math.log(threshold)
-        # print("total_tokens",total_tokens)
-        # print("depth",depth)
-        # print("top_k",top_k)
-        # print("threshold",threshold)
+        self.stable_length = 0 # use to record the stable_kv_length
 
         self.hidden_size = config.hidden_size
         self.midlayer = LlamaDecoderLayeremb(config)
@@ -727,21 +714,17 @@ class DraftAdapter(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        std=None,
     ):
         batch_size, seq_length, _ = hidden_states.shape
         seq_length_with_past = seq_length
         past_key_values_length = 0
-
         with torch.no_grad():
             inputs_embeds = self.embed_tokens(input_ids)
 
         if past_key_values is not None:
-            past_key_values_length = past_key_values[0][0].shape[2]
+            past_key_values_length = past_key_values.get_seq_length()
             seq_length_with_past = seq_length_with_past + past_key_values_length
         if position_ids is None:
             device = (
@@ -758,6 +741,12 @@ class DraftAdapter(nn.Module):
             position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
         else:
             position_ids = position_ids.view(-1, seq_length).long()
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values_length
+            cache_position: torch.Tensor = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
 
         # position_ids=position_ids//4
         if attention_mask is None:
@@ -777,34 +766,21 @@ class DraftAdapter(nn.Module):
         if hidden_states.shape[-1] != inputs_embeds.shape[-1]:
             hidden_states = self.fc(hidden_states)
 
-        next_decoder_cache = () if use_cache else None
-
-        past_key_value = past_key_values[0] if past_key_values is not None else None
-        layer_outputs = self.midlayer(
+        hidden_states = self.midlayer(
             input_emb=inputs_embeds,
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=True,
+            past_key_value=past_key_values,
+            cache_position=cache_position,
+            use_cache=use_cache,
         )
-        if use_cache:
-            next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
-        hidden_states = layer_outputs[0]
-
-        if use_cache:
-            return hidden_states, next_decoder_cache
-
         return hidden_states
 
-    def reset_kv(self):
-        self.stable_kv = None
-
-    from .utils import record_time
-    @record_time("draft")
+    # from .profile import record_time
+    # @record_time("draft")
     @torch.no_grad()
-    def tree_draft(self, hidden_states, input_ids, head, logits_processor):
+    def tree_draft(self, hidden_states, input_ids, head, past_key_values,logits_processor):
         input_ids = input_ids.to(hidden_states.device)
         total_tokens = self.total_tokens
         depth = self.depth
@@ -822,28 +798,18 @@ class DraftAdapter(nn.Module):
 
         # with Timer("draft many"):
         # init forward
-        if hasattr(self, "stable_kv") and self.stable_kv is not None:
-            kv_len = self.stable_kv[0][0].shape[2]
-            out_hidden, past_key_values = self(
-                hidden_states,
-                input_ids=input_ids[:, kv_len:],
-                past_key_values=self.stable_kv,
-                use_cache=True,
-            )
-        else:
-            out_hidden, past_key_values = self(
-                hidden_states, input_ids=input_ids, use_cache=True
-            )
-        self.stable_kv = past_key_values
+        kv_len = past_key_values.get_seq_length()
+        out_hidden = self(
+            hidden_states, input_ids=input_ids[:, kv_len:], past_key_values=past_key_values, use_cache=True
+        )
+        self.stable_length = past_key_values.get_seq_length()
         last_hidden = out_hidden[:, -1]
 
         # last_headout = head(last_hidden)
         last_headout = self.lm_head(self.norm(last_hidden))
 
         last_p = self.logsoftmax(last_headout)
-        top = torch.topk(
-            last_p, top_k, dim=-1
-        )  # root is sampled token
+        top = torch.topk(last_p, top_k, dim=-1)  # root is sampled token
         topk_index, topk_p = top.indices, top.values
         scores = topk_p[0]
         scores_list.append(scores[None])
@@ -863,7 +829,7 @@ class DraftAdapter(nn.Module):
             self.tree_mask = tree_mask
             position_ids = len_posi + self.position_ids
             # with Timer("draft one"):
-            out_hidden, past_key_values = self(
+            out_hidden = self(
                 input_hidden,
                 input_ids=input_ids,
                 past_key_values=past_key_values,

@@ -24,31 +24,24 @@ from typing import Callable, Optional, Tuple, Union
 import torch
 from torch import nn
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.integrations import use_kernel_forward_from_hub
-from transformers.masking_utils import (
-    create_causal_mask,
-    create_sliding_window_causal_mask,
-)
+from transformers.masking_utils import (create_causal_mask,
+                                        create_sliding_window_causal_mask)
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-    QuestionAnsweringModelOutput,
-    SequenceClassifierOutputWithPast,
-    TokenClassifierOutput,
-)
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.modeling_outputs import (BaseModelOutputWithPast,
+                                           CausalLMOutputWithPast,
+                                           QuestionAnsweringModelOutput,
+                                           SequenceClassifierOutputWithPast,
+                                           TokenClassifierOutput)
+from transformers.modeling_rope_utils import (ROPE_INIT_FUNCTIONS,
+                                              dynamic_rope_update)
+from transformers.modeling_utils import PreTrainedModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.processing_utils import Unpack
-from transformers.utils import (
-    auto_docstring,
-    can_return_tuple,
-    logging,
-)
+from transformers.utils import auto_docstring, can_return_tuple, logging
 
 logger = logging.get_logger(__name__)
 

@@ -8,7 +8,7 @@ EAGLE_model_path = '/home/lab6033/zhendong/models/eagle/EAGLE3-LLaMA3.1-Instruct
 model = Speculator.from_pretrained(
     base_model_path=base_model_path,
     ea_model_path=EAGLE_model_path,
-    torch_dtype=torch.float16,
+    dtype=torch.bfloat16,
     low_cpu_mem_usage=True,
     device_map="auto",
     total_token=-1
@@ -32,6 +32,6 @@ model_inputs = tokenizer([text], return_tensors="pt").to(device)
 input_ids = model_inputs["input_ids"]
 
 # generate
-output_ids=model.ea_generate(input_ids,temperature=0.8,max_new_tokens=1024)
+output_ids=model.spec_generate(input_ids,temperature=0.8,max_new_tokens=1024, max_length=64000)
 output=model.tokenizer.decode(output_ids[0])
 print(output)
