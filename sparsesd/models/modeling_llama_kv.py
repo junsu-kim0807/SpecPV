@@ -311,7 +311,7 @@ class LlamaAttention(nn.Module):
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        # TODO: fix attention with kv cache
+        # kv cache update
         if full_past_key_values is not None:
             # cache_position needed for the static cache
             cache_kwargs = {"cache_position": cache_position}
@@ -319,14 +319,26 @@ class LlamaAttention(nn.Module):
             valid_len = int(cache_position.max().item()) + 1 # sychronize
             key_states = key_states[:, :, :valid_len, :]
             value_states = value_states[:, :, :valid_len, :]
-        else:
-            # partial_past_key
-            pass
+            if partial_past_key_values is not None:
+                # refresh partial_kv cache
+                verified_len = int(cache_position.min().item())
+                partial_past_key_values.refresh_retrieval(
+                    query_states=query_states,
+                    key_states=key_states[:, :, :verified_len, :],
+                    value_states=value_states[:, :, :verified_len, :],
+                    seq_len=verified_len,
+                    layer_idx=self.layer_idx
+                )
+                partial_past_key_values.update(
+                    new_key_states=key_states[:, :, verified_len:valid_len, :],
+                    new_value_states=value_states[:, :, verified_len:valid_len, :],
+                    layer_idx=self.layer_idx
+                )
+        elif partial_past_key_values is not None:
+            # partial verify
+            key_states, value_states = partial_past_key_values.update(key_states, value_states, self.layer_idx)
 
-        if partial_past_key_values is not None:
-            # print(attention_mask)
-            pass
-
+        # attn calculate
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]

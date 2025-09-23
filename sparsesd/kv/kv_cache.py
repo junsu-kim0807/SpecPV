@@ -2,6 +2,8 @@ import torch
 from typing import Any, Dict, List, Optional, Tuple
 from transformers.cache_utils import StaticCache, OffloadedStaticCache
 from dataclasses import dataclass
+import math
+from ..models.modeling_llama_kv import repeat_kv
 
 class Cache:
     """
@@ -20,10 +22,10 @@ class Cache:
 @dataclass
 class CacheConfig:
     block_size: int = 16              
-    n_sink_blocks: int = 4             
+    n_sink_blocks: int = 2             
     n_retrieval_blocks: int = 256      
-    n_buffer_blocks: int = 4         
-    n_spec_tokens_buf: int = 100       
+    n_window_blocks: int = 2         
+    n_spec_tokens_buf: int = 128       
     max_batch_size: int = 1            
 
     @property
@@ -35,16 +37,16 @@ class CacheConfig:
         return self.n_retrieval_blocks * self.block_size
     
     @property
-    def buffer_size(self) -> int:
-        return self.n_buffer_blocks * self.block_size
+    def window_size(self) -> int:
+        return self.n_window_blocks * self.block_size
 
     @property
     def total_budget(self) -> int:
-        return self.sink_size + self.retrieval_size + self.buffer_size + self.n_spec_tokens_buf
+        return self.sink_size + self.retrieval_size + self.window_size + self.n_spec_tokens_buf
 
 
 class PartialKVCache(Cache):
-    def __init__(self, cache_config, model_config, device="cuda", dtype=torch.bfloat16):
+    def __init__(self, cache_config: CacheConfig, model_config, max_length, device="cuda", dtype=torch.bfloat16):
         super().__init__()
         # config
         self.cache_config = cache_config
@@ -53,21 +55,21 @@ class PartialKVCache(Cache):
         self.num_layers = model_config.num_hidden_layers
         self.num_kv_heads = getattr(model_config, "num_key_value_heads", model_config.num_attention_heads)
         self.head_dim = getattr(model_config, "head_dim", model_config.hidden_size // model_config.num_attention_heads)
+        # state flag
+        self.retrieval_initialized = False
+        self.enabled = False
 
         self.key_cache: list[dict[str, torch.Tensor]] = []
         self.value_cache: list[dict[str, torch.Tensor]] = []
         self.verified_lens = []
-        self.current_lens = []
+        max_blocks = math.ceil(max_length / cache_config.block_size)
+        self.key_states_summary: list[dict[str, torch.Tensor]] = []
+        self.summary_block_count = []
 
         # build per-layer cache
         for _ in range(self.num_layers):
             # allocate one big tensor [batch, heads, total_budget, head_dim]
-            total_budget = (
-                cache_config.sink_size
-                + cache_config.retrieval_size
-                + cache_config.buffer_size
-            )
-            cache_shape = (cache_config.max_batch_size, self.num_kv_heads, total_budget, self.head_dim)
+            cache_shape = (cache_config.max_batch_size, self.num_kv_heads, cache_config.total_budget, self.head_dim)
 
             key_storage = torch.zeros(cache_shape, dtype=dtype, device=device)
             value_storage = torch.zeros(cache_shape, dtype=dtype, device=device)
@@ -76,39 +78,163 @@ class PartialKVCache(Cache):
             offset = 0
             sink_slice = slice(offset, offset + cache_config.sink_size); offset += cache_config.sink_size
             retri_slice = slice(offset, offset + cache_config.retrieval_size); offset += cache_config.retrieval_size
-            buffer_slice = slice(offset, offset + cache_config.buffer_size)
+            window_slice = slice(offset, offset + cache_config.window_size); offset += cache_config.window_size
+            buffer_slice = slice(offset, offset + cache_config.n_spec_tokens_buf)
 
             # record partitions
             self.key_cache.append({
+                "all": key_storage,
                 "sink": key_storage[:, :, sink_slice, :],
                 "retrieval": key_storage[:, :, retri_slice, :],
-                "buffer": key_storage[:, :, buffer_slice, :],
-                # no spec anymore
+                "window": key_storage[:, :, window_slice, :],
+                "buffer": key_storage[:, :, buffer_slice, :]
             })
             self.value_cache.append({
+                "all": value_storage,
                 "sink": value_storage[:, :, sink_slice, :],
                 "retrieval": value_storage[:, :, retri_slice, :],
-                "buffer": value_storage[:, :, buffer_slice, :],
+                "window": value_storage[:, :, window_slice, :],
+                "buffer": value_storage[:, :, buffer_slice, :]
             })
+            self.key_states_summary.append({
+                "max": torch.zeros((cache_shape[0], cache_shape[1], max_blocks, cache_shape[3]), device=device, dtype=dtype),
+                "min": torch.zeros((cache_shape[0], cache_shape[1], max_blocks, cache_shape[3]), device=device, dtype=dtype),
+            })
+            self.summary_block_count.append(0)
             self.verified_lens.append(0)
-            self.current_lens.append(0)
 
-    def summary_key_states(self):
-        pass
-
-    def add_to_sink(self, kv_blocks):
-        pass
-
-    def refresh_retrieval(self, query, full_cache_index):
-        pass
-
-    def update(self, new_tokens_kv):
+    def summary_key_states(self, key_states, seq_len, layer_idx: int):
         """
-        Append new generated tokens' KV into the spec buffer.
-        Return the active KV subset (sink + retrieval + buffer + spec_buffer)
-        to be used for inference in the next step.
+        Incrementally update the max/min values of summary_key_states[layer_idx].
+        key_states: [B, H, L, D] represents the key of the current layer.
         """
-        pass
+        block_size = self.cache_config.block_size
+        sink_size = self.cache_config.sink_size
+        existing_blocks = self.summary_block_count[layer_idx]
+        expected_blocks = max(0, (seq_len - sink_size) // block_size)
+
+        # update incrementally
+        for block_idx in range(existing_blocks, expected_blocks):
+            start = sink_size + block_idx * block_size
+            end = start + block_size
+            if end > seq_len:
+                break  # not fill a block
+            block_key_states = key_states[:, :, start:end, :]
+            k_max = block_key_states.max(dim=2).values
+            k_min = block_key_states.min(dim=2).values
+            self.key_states_summary[layer_idx]["max"][:, :, block_idx, :] = k_max
+            self.key_states_summary[layer_idx]["min"][:, :, block_idx, :] = k_min
+            self.summary_block_count[layer_idx] += 1
+
+    def add_to_sink(self, key_states, value_states, layer_idx: int):
+        sink_size = self.cache_config.sink_size
+        k = key_states[:, :, :sink_size, :]
+        v = value_states[:, :, :sink_size, :]
+        self.key_cache[layer_idx]["sink"][:, :, :sink_size, :] = k
+        self.value_cache[layer_idx]["sink"][:, :, :sink_size, :] = v
+
+    def refresh_retrieval(self, query_states, key_states, value_states, seq_len, layer_idx: int, reduce_type: str="max"):
+        # 1. update summary_key_states
+        retrieval_len = seq_len - self.cache_config.window_size
+        self.summary_key_states(key_states, retrieval_len, layer_idx)
+        summary = self.key_states_summary[layer_idx]
+        num_blocks = self.summary_block_count[layer_idx]
+
+        # 2. get scores [B,H,Q,D] x [B,H,N,D] -> [B,H,Q,N]
+        n_rep = int(query_states.size(1) // key_states.size(1))
+        summary_max = repeat_kv(summary["max"][:, :, :num_blocks, :], n_rep)
+        summary_min = repeat_kv(summary["min"][:, :, :num_blocks, :], n_rep)
+        sim_max = torch.einsum("bhqd,bhnd->bhqn", query_states, summary_max)
+        sim_min = torch.einsum("bhqd,bhnd->bhqn", query_states, summary_min)
+        scores = torch.maximum(sim_max, sim_min)  
+
+        # 3. reduce scores [B,H,N]
+        if reduce_type == "max":
+            scores = scores.max(dim=2).values  
+        elif reduce_type == "mean":
+            scores = scores.mean(dim=2)        
+        else:
+            raise ValueError(f"Unknown reduce_type: {reduce_type}")
+        if n_rep > 1:
+            # for GQA
+            B, H, N = scores.shape
+            H_kv = H // n_rep
+            scores = scores.reshape(B, H_kv, n_rep, N)
+            scores = scores.mean(dim=2)
+
+        # 4. top-k block selection
+        topk_blocks = min(self.cache_config.n_retrieval_blocks, num_blocks)
+        assert num_blocks >= topk_blocks, (
+            f"Not enough blocks for retrieval: need {topk_blocks}, but only have {num_blocks}. "
+            "Ensure seq_len and block partitioning produce enough blocks before refresh_retrieval."
+        )
+        _, top_indices = torch.topk(scores, k=topk_blocks, dim=-1)  # [B,H,K]
+        # get shape
+        block_size = self.cache_config.block_size
+        B, H, K = top_indices.shape
+        D = key_states.size(-1)
+        # convert block indices → token indices
+        token_offsets = torch.arange(block_size, device=top_indices.device)  # [block_size]
+        token_indices = top_indices[..., None] * block_size + token_offsets  # [B,H,K,block_size]
+        token_indices = token_indices.reshape(B, H, K * block_size)          # [B,H,K*block_size]
+        token_indices, _ = torch.sort(token_indices, dim=-1)
+        token_indices_exp = token_indices.unsqueeze(-1).expand(-1, -1, -1, D)  # [B,H,K*block_size,D] expand dim
+        # indices keys/values
+        retri_k_new = torch.take_along_dim(key_states, token_indices_exp, dim=2)  # [B,H,R,D]
+        retri_v_new = torch.take_along_dim(value_states, token_indices_exp, dim=2)
+        # write retrieval cache
+        retri_k = self.key_cache[layer_idx]["retrieval"]
+        retri_v = self.value_cache[layer_idx]["retrieval"]
+        retri_k.copy_(retri_k_new.to(retri_k.device, non_blocking=True))
+        retri_v.copy_(retri_v_new.to(retri_v.device, non_blocking=True))
+
+        # 5. fill window with the most recent tokens
+        win_k = self.key_cache[layer_idx]["window"]   # [B,H,W,D]
+        win_v = self.value_cache[layer_idx]["window"]
+        window_size = self.cache_config.window_size
+
+        assert seq_len >= window_size, (
+            f"Window size {window_size} is larger than current sequence length {seq_len}. "
+            "Ensure seq_len >= window_size before calling refresh_retrieval."
+        )
+        win_slice = slice(seq_len - window_size, seq_len)
+        win_k.copy_(key_states[:, :, win_slice, :].to(win_k.device, non_blocking=True))
+        win_v.copy_(value_states[:, :, win_slice, :].to(win_v.device, non_blocking=True))
+
+        # 6. reset verified_lens = 0
+        self.verified_lens[layer_idx] = 0
+
+    def init_key_values(self, full_past_key_values):
+        if self.enabled:
+            return
+        for layer_idx, (key_states, value_states) in enumerate(full_past_key_values):
+            self.add_to_sink(key_states, value_states, layer_idx)
+        self.enabled = True
+
+    def update(self, new_key_states, new_value_states, layer_idx: int):
+        # buffer slice for this layer
+        buf_k = self.key_cache[layer_idx]["buffer"]
+        buf_v = self.value_cache[layer_idx]["buffer"]
+        seq_len = new_key_states.size(2)
+        start = self.verified_lens[layer_idx]
+        end = start + seq_len  # new key: [B, H, L, D]
+        assert end <= buf_k.size(2), (
+            f"Buffer overflow at layer {layer_idx}: "
+            f"trying to write {seq_len} tokens, but buffer size={buf_k.size(2)}, verified={start}."
+        )
+        # copy into buffer
+        buf_k[:, :, start:end, :].copy_(new_key_states.to(buf_k.device, non_blocking=True))
+        buf_v[:, :, start:end, :].copy_(new_value_states.to(buf_v.device, non_blocking=True))
+        # return key and values
+        valid_len = self.get_seq_length(layer_idx) + seq_len
+        return (
+            self.key_cache[layer_idx]["all"][:, :, :valid_len, :],
+            self.value_cache[layer_idx]["all"][:, :, :valid_len, :]
+        )
+
+    def get_seq_length(self, layer_idx: int = 0):
+        config = self.cache_config
+        return config.sink_size + config.retrieval_size + config.window_size + self.verified_lens[layer_idx]
 
     def spec_update(self, candidate_tokens_kv):
         """
@@ -118,16 +244,24 @@ class PartialKVCache(Cache):
         """
         pass
 
-    def get_seq_length():
-        pass
-
-    def clear(self):
-        pass
+    def reset(self):
+        self.retrieval_initialized = False
+        self.enabled = False
+        # reset per-layer caches
+        for layer_idx in range(self.num_layers):
+            # zero out key/value cache
+            self.key_cache[layer_idx]["all"].zero_()
+            self.value_cache[layer_idx]["all"].zero_()
+            # reset summary stats
+            self.key_states_summary[layer_idx]["max"].zero_()
+            self.key_states_summary[layer_idx]["min"].zero_()
+            self.summary_block_count[layer_idx] = 0
+            self.verified_lens[layer_idx] = 0
 
 
 # from pytorch_memlab import profile
 # @profile
-def initialize_past_key_values(model, draft_model, max_length=8192, offloading=True):
+def initialize_past_key_values(model, draft_model, max_length=8192, offloading=False):
     config = model.config
     
     # init full kv cache
@@ -138,8 +272,10 @@ def initialize_past_key_values(model, draft_model, max_length=8192, offloading=T
     )
     
     # init partial kv cache
-    partial_cache_config = CacheConfig()
-    partial_past_key_values = PartialKVCache(cache_config=partial_cache_config, model_config=config, dtype=model.dtype)
+    # partial_cache_config = CacheConfig(n_retrieval_blocks=13, n_spec_tokens_buf=75)
+    partial_cache_config = CacheConfig(n_retrieval_blocks=256, n_spec_tokens_buf=75)
+    # print("Total Budget", partial_cache_config.total_budget)
+    partial_past_key_values = PartialKVCache(cache_config=partial_cache_config, model_config=config, dtype=model.dtype, max_length=max_length)
 
     # init draft kv cache
     draft_past_key_values = StaticCache(

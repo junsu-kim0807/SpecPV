@@ -65,7 +65,6 @@ class Speculator(nn.Module):
         self.ea_layer.to(self.base_model.dtype).to(device)
         self.ea_layer.init_tree()
 
-
     def _init_draft_layer(self, config, total_token, depth, top_k, threshold):
         if not self.use_eagle3:
             raise NotImplementedError("Only Eagle3 draft layer is supported.")
@@ -176,7 +175,7 @@ class Speculator(nn.Module):
         else:
             return outputs, hidden_states
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def spec_generate(
         self,
         input_ids,
@@ -202,16 +201,14 @@ class Speculator(nn.Module):
         padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(input_ids.device)
         input_ids = input_ids.clone()
 
-        # TODO: fix reset kv cache
-        # self.ea_layer.reset_kv()
         # Initialize the past key and value states
         if hasattr(self, "full_past_key_values"):
-            # TODO: fix reset and clear remember to reset
             full_past_key_values = self.full_past_key_values
-            past_key_values_data = self.past_key_values_data
-            current_length_data = self.current_length_data
-            # Reset the past key and value states
-            current_length_data.zero_()
+            partial_past_key_values = self.partial_past_key_values
+            draft_past_key_values = self.draft_past_key_values
+            full_past_key_values.reset()
+            partial_past_key_values.reset()
+            draft_past_key_values.reset()
         else:
             (
                 full_past_key_values,
@@ -237,13 +234,11 @@ class Speculator(nn.Module):
         new_token = 0
         max_length = max_length - self.ea_layer.total_tokens - 10
         for idx in range(max_length):
-            # with Timer("all"):
             self.base_model.model.tree_mask = tree_mask
             draft_tokens = draft_tokens.to(input_ids.device)
 
-            # TODO: 达到条件后初始化Retrieval，进行长上下文生成
-            if True:
-                pass
+            if input_ids.shape[1] > partial_past_key_values.cache_config.total_budget:
+                partial_past_key_values.init_key_values(full_past_key_values)
 
             # Target model forward, get logits
             logits, hidden_state_new, outputs = tree_decoding(
@@ -262,7 +257,7 @@ class Speculator(nn.Module):
             best_candidate, accept_length, sample_p = evaluate_posterior(
                 logits, candidates, logits_processor
             )
-            # print(accept_length)
+            print(accept_length)
 
             # Adjusting the input sequence, draft model forward
             (

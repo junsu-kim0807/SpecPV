@@ -94,6 +94,13 @@ def chunked_prefilling(
     )
 
 
+def should_partial_verify(partial_past_key_values, total_tokens):
+    enabled = partial_past_key_values.enabled
+    initialized = partial_past_key_values.retrieval_initialized
+    capacity = (partial_past_key_values.get_seq_length() + total_tokens + 1 <= partial_past_key_values.cache_config.total_budget) # with a sampled token
+    return (enabled and initialized and capacity)
+
+
 # @record_time("verify")
 def tree_decoding(
     model,
@@ -107,15 +114,28 @@ def tree_decoding(
     position_ids = tree_position_ids + input_ids.shape[1]
     if position_ids is not None and position_ids.dim() == 1:
         position_ids = position_ids.unsqueeze(0)
-    if True:
-        # TODO: 满足什么条件用full，其他用partial
-        outputs, tree_logits, hidden_state = model(
-            tree_candidates,
-            output_orig=True,
-            full_past_key_values=full_past_key_values,
-            partial_past_key_values=partial_past_key_values,
-            position_ids=position_ids,
-        )
+
+    # set kv cache
+    total_tokens = model.ea_layer.total_tokens
+    if should_partial_verify(partial_past_key_values, total_tokens):
+        print('patial verify')
+        full_cache = None
+        partial_cache = partial_past_key_values
+    elif partial_past_key_values.enabled:
+        full_cache = full_past_key_values
+        partial_cache = partial_past_key_values
+        partial_past_key_values.retrieval_initialized = True
+    else:
+        full_cache = full_past_key_values
+        partial_cache = None
+
+    outputs, tree_logits, hidden_state = model(
+        tree_candidates,
+        output_orig=True,
+        full_past_key_values=full_cache,
+        partial_past_key_values=partial_cache,
+        position_ids=position_ids,
+    )
 
     if model.use_eagle3:
         ea_device = model.ea_layer.lm_head.weight.device
@@ -242,7 +262,28 @@ def update_inference_inputs(
     )
     
     # Roll back full_kv, partial_kv and draft_kv
-    if full_past_key_values is not None:
+    total_tokens = model.ea_layer.total_tokens
+    if should_partial_verify(partial_past_key_values, total_tokens) or partial_past_key_values.enabled:
+        # roll back partial
+        for layer_idx, (key_cache, value_cache) in enumerate(zip(partial_past_key_values.key_cache, partial_past_key_values.value_cache)):
+            buf_k = key_cache["buffer"]
+            buf_v = value_cache["buffer"]
+            tgt_len = select_indices.numel()
+            # 0. get indices
+            verified_len = partial_past_key_values.verified_lens[layer_idx]
+            local_indices = select_indices - prev_input_len + verified_len
+            local_indices = local_indices.to(buf_k.device)
+            # 1. copy data
+            src_k = buf_k[:, :, local_indices, :].clone()
+            src_v = buf_v[:, :, local_indices, :].clone()
+            buf_k[:, :, verified_len:verified_len+tgt_len, :].copy_(src_k, non_blocking=True)
+            buf_v[:, :, verified_len:verified_len+tgt_len, :].copy_(src_v, non_blocking=True)
+            # 2. set zero 
+            buf_k[:, :, verified_len+tgt_len:, :].zero_()
+            buf_v[:, :, verified_len+tgt_len:, :].zero_()
+            # 3. update verified_lens
+            partial_past_key_values.verified_lens[layer_idx] += tgt_len
+    if not should_partial_verify(partial_past_key_values, total_tokens):
         # roll back full 
         for layer_cache in full_past_key_values.layers:
             key_layer = layer_cache.keys
@@ -258,11 +299,8 @@ def update_inference_inputs(
             # 2. set zero
             key_layer[:, :, prev_input_len + tgt_len:, :].zero_()
             value_layer[:, :, prev_input_len + tgt_len:, :].zero_()
-        # TODO: add roll back partial
-    elif partial_past_key_values is not None:
-        # roll back partial
-        pass
-
+    
+    # roll back draft_kv
     rollback_len = model.ea_layer.stable_length
     for layer_cache in draft_past_key_values.layers:
         key_layer = layer_cache.keys
