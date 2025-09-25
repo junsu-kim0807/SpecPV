@@ -24,7 +24,7 @@ class CacheConfig:
     block_size: int = 16              
     n_sink_blocks: int = 2             
     n_retrieval_blocks: int = 256      
-    n_window_blocks: int = 2         
+    n_window_blocks: int = 4         
     n_spec_tokens_buf: int = 128       
     max_batch_size: int = 1            
 
@@ -62,6 +62,7 @@ class PartialKVCache(Cache):
         self.key_cache: list[dict[str, torch.Tensor]] = []
         self.value_cache: list[dict[str, torch.Tensor]] = []
         self.verified_lens = []
+        self.global_verified_lens = 0
         max_blocks = math.ceil(max_length / cache_config.block_size)
         self.key_states_summary: list[dict[str, torch.Tensor]] = []
         self.summary_block_count = []
@@ -236,14 +237,6 @@ class PartialKVCache(Cache):
         config = self.cache_config
         return config.sink_size + config.retrieval_size + config.window_size + self.verified_lens[layer_idx]
 
-    def spec_update(self, candidate_tokens_kv):
-        """
-        After partial verification, resolve candidate KV entries:
-        - Accepted tokens are committed into the buffer partition.
-        - Rejected tokens are discarded.
-        """
-        pass
-
     def reset(self):
         self.retrieval_initialized = False
         self.enabled = False
@@ -257,6 +250,12 @@ class PartialKVCache(Cache):
             self.key_states_summary[layer_idx]["min"].zero_()
             self.summary_block_count[layer_idx] = 0
             self.verified_lens[layer_idx] = 0
+
+    def reset_buffer(self):
+        for layer_idx in range(self.num_layers):
+            self.verified_lens[layer_idx] = 0
+            self.key_cache[layer_idx]["buffer"].zero_()
+            self.value_cache[layer_idx]["buffer"].zero_()
 
 
 # from pytorch_memlab import profile
@@ -273,7 +272,8 @@ def initialize_past_key_values(model, draft_model, max_length=8192, offloading=F
     
     # init partial kv cache
     # partial_cache_config = CacheConfig(n_retrieval_blocks=13, n_spec_tokens_buf=75)
-    partial_cache_config = CacheConfig(n_retrieval_blocks=256, n_spec_tokens_buf=75)
+    partial_cache_config = CacheConfig(n_retrieval_blocks=128, n_spec_tokens_buf=70)
+    print(partial_cache_config.total_budget)
     # print("Total Budget", partial_cache_config.total_budget)
     partial_past_key_values = PartialKVCache(cache_config=partial_cache_config, model_config=config, dtype=model.dtype, max_length=max_length)
 

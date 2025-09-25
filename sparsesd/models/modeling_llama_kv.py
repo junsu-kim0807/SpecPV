@@ -321,7 +321,7 @@ class LlamaAttention(nn.Module):
             value_states = value_states[:, :, :valid_len, :]
             if partial_past_key_values is not None:
                 # refresh partial_kv cache
-                verified_len = int(cache_position.min().item())
+                verified_len = partial_past_key_values.global_verified_lens
                 partial_past_key_values.refresh_retrieval(
                     query_states=query_states,
                     key_states=key_states[:, :, :verified_len, :],

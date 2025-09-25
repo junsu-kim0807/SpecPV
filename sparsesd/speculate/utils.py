@@ -116,17 +116,29 @@ def tree_decoding(
         position_ids = position_ids.unsqueeze(0)
 
     # set kv cache
+    missing_lens = 0
     total_tokens = model.ea_layer.total_tokens
     if should_partial_verify(partial_past_key_values, total_tokens):
-        print('patial verify')
+        # print('patial verify')
         full_cache = None
+        full_past_key_values.enabled = False
         partial_cache = partial_past_key_values
     elif partial_past_key_values.enabled:
         full_cache = full_past_key_values
+        full_cache.enabled = True
         partial_cache = partial_past_key_values
-        partial_past_key_values.retrieval_initialized = True
+        partial_cache.reset_buffer()
+        kv_len = full_cache.get_seq_length()
+        if kv_len < input_ids.shape[1]:
+            # cat un-full verifed tokens
+            tree_candidates = torch.cat((input_ids[:, kv_len:], tree_candidates), dim=1)
+            missing_pos = torch.arange(kv_len, input_ids.shape[1], device=input_ids.device, dtype=position_ids.dtype).unsqueeze(0)
+            position_ids = torch.cat((missing_pos, position_ids), dim=1)
+            missing_lens = input_ids.shape[1] - kv_len
+        partial_past_key_values.global_verified_lens = input_ids.shape[1]
     else:
         full_cache = full_past_key_values
+        full_cache.enabled = True
         partial_cache = None
 
     outputs, tree_logits, hidden_state = model(
@@ -136,6 +148,7 @@ def tree_decoding(
         partial_past_key_values=partial_cache,
         position_ids=position_ids,
     )
+    tree_logits = tree_logits[:, missing_lens:, :]
 
     if model.use_eagle3:
         ea_device = model.ea_layer.lm_head.weight.device
@@ -262,8 +275,28 @@ def update_inference_inputs(
     )
     
     # Roll back full_kv, partial_kv and draft_kv
-    total_tokens = model.ea_layer.total_tokens
-    if should_partial_verify(partial_past_key_values, total_tokens) or partial_past_key_values.enabled:
+    if full_past_key_values.enabled:
+        # roll back full 
+        for layer_cache in full_past_key_values.layers:
+            key_layer = layer_cache.keys
+            value_layer = layer_cache.values
+            tgt_len = select_indices.numel()
+            # 1. copy data
+            dst_k = key_layer[:, :, prev_input_len:prev_input_len + tgt_len, :]
+            dst_v = value_layer[:, :, prev_input_len:prev_input_len + tgt_len, :]
+            src_k = key_layer[:, :, select_indices.to(key_layer.device), :].clone()
+            src_v = value_layer[:, :, select_indices.to(value_layer.device), :].clone()
+            dst_k.copy_(src_k, non_blocking=True)
+            dst_v.copy_(src_v, non_blocking=True)
+            # 2. set zero
+            key_layer[:, :, prev_input_len + tgt_len:, :].zero_()
+            value_layer[:, :, prev_input_len + tgt_len:, :].zero_()
+
+    if partial_past_key_values.enabled:
+        # Set retrieval_initialized here to ensure consistency:
+        # both update_inference_inputs() and tree_decoding() will observe
+        # the same should_partial_verify state after the first initialization.
+        partial_past_key_values.retrieval_initialized = True
         # roll back partial
         for layer_idx, (key_cache, value_cache) in enumerate(zip(partial_past_key_values.key_cache, partial_past_key_values.value_cache)):
             buf_k = key_cache["buffer"]
@@ -283,23 +316,7 @@ def update_inference_inputs(
             buf_v[:, :, verified_len+tgt_len:, :].zero_()
             # 3. update verified_lens
             partial_past_key_values.verified_lens[layer_idx] += tgt_len
-    if not should_partial_verify(partial_past_key_values, total_tokens):
-        # roll back full 
-        for layer_cache in full_past_key_values.layers:
-            key_layer = layer_cache.keys
-            value_layer = layer_cache.values
-            tgt_len = select_indices.numel()
-            # 1. copy data
-            dst_k = key_layer[:, :, prev_input_len:prev_input_len + tgt_len, :]
-            dst_v = value_layer[:, :, prev_input_len:prev_input_len + tgt_len, :]
-            src_k = key_layer[:, :, select_indices.to(key_layer.device), :].clone()
-            src_v = value_layer[:, :, select_indices.to(value_layer.device), :].clone()
-            dst_k.copy_(src_k, non_blocking=True)
-            dst_v.copy_(src_v, non_blocking=True)
-            # 2. set zero
-            key_layer[:, :, prev_input_len + tgt_len:, :].zero_()
-            value_layer[:, :, prev_input_len + tgt_len:, :].zero_()
-    
+
     # roll back draft_kv
     rollback_len = model.ea_layer.stable_length
     for layer_cache in draft_past_key_values.layers:

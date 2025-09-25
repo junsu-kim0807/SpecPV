@@ -218,6 +218,7 @@ class Speculator(nn.Module):
             self.full_past_key_values = full_past_key_values
             self.partial_past_key_values = partial_past_key_values
             self.draft_past_key_values = draft_past_key_values
+        full_past_key_values.enabled = True
 
         input_len = input_ids.shape[1]
         reset_tree_mode(self)
@@ -237,7 +238,7 @@ class Speculator(nn.Module):
             self.base_model.model.tree_mask = tree_mask
             draft_tokens = draft_tokens.to(input_ids.device)
 
-            if input_ids.shape[1] > partial_past_key_values.cache_config.total_budget:
+            if input_ids.shape[1] > partial_past_key_values.cache_config.total_budget and True:
                 partial_past_key_values.init_key_values(full_past_key_values)
 
             # Target model forward, get logits
