@@ -200,6 +200,8 @@ class Speculator(nn.Module):
             logits_processor = None
         padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(input_ids.device)
         input_ids = input_ids.clone()
+        if log:
+            metrics = {"new_token": 0, "accept_lengths": []}
 
         # Initialize the past key and value states
         if hasattr(self, "full_past_key_values"):
@@ -258,7 +260,8 @@ class Speculator(nn.Module):
             best_candidate, accept_length, sample_p = evaluate_posterior(
                 logits, candidates, logits_processor
             )
-            print(accept_length)
+            if log:
+                metrics["accept_lengths"].append(accept_length)
 
             # Adjusting the input sequence, draft model forward
             (
@@ -296,7 +299,10 @@ class Speculator(nn.Module):
         if not log:
             return input_ids
         else:
-            return input_ids, new_token, idx
+            metrics["new_token"] = new_token
+            avg_accept_len = sum(metrics["accept_lengths"]) / len(metrics["accept_lengths"]) 
+            metrics["avg_accept_len"] = avg_accept_len
+            return input_ids, metrics
 
     @torch.no_grad()
     def naive_generate(
