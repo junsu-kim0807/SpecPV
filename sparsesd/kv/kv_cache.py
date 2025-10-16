@@ -24,7 +24,7 @@ class CacheConfig:
     block_size: int = 16              
     n_sink_blocks: int = 2             
     n_retrieval_blocks: int = 256      
-    n_window_blocks: int = 4         
+    n_window_blocks: int = 4        
     n_spec_tokens_buf: int = 128       
     max_batch_size: int = 1            
 
@@ -135,6 +135,7 @@ class PartialKVCache(Cache):
         self.value_cache[layer_idx]["sink"][:, :, :sink_size, :] = v
 
     def refresh_retrieval(self, query_states, key_states, value_states, seq_len, layer_idx: int, reduce_type: str="max"):
+        # print(query_states.shape)
         # 1. update summary_key_states
         retrieval_len = seq_len - self.cache_config.window_size
         self.summary_key_states(key_states, retrieval_len, layer_idx)
