@@ -1,4 +1,4 @@
-# Python 编译文件
+# Python File
 __pycache__/
 *.pyc
 *.pyo
@@ -7,26 +7,26 @@ __pycache__/
 *.egg
 *.egg-info
 
-# 虚拟环境
+# venv
 venv/
 .env
 .venv
 
-# IDE 和编辑器
+# IDE
 .vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
 
-# 构建产物
+# build results
 sparsesd.egg-info/
 *.dist-info/
 __init__.cpython-*.pyc
 
-# 配置文件（如果有敏感信息）
+# configs
 # configs/
 
-# 其他临时文件
+# others
 *.log
 *.tmp
 *.bak
@@ -34,9 +34,9 @@ __init__.cpython-*.pyc
 .DS_Store
 Thumbs.db
 
-# 依赖缓存
+# cache
 .pytest_cache/
 .tox/
 
-# 如果有使用 GPU 配置文件，确认是否包含敏感信息后决定是否忽略
-# configs/multi_gpu.yaml
+# test datasets
+data/
