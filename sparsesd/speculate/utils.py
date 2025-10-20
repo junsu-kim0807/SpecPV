@@ -100,7 +100,7 @@ def should_partial_verify(partial_past_key_values, total_tokens):
     capacity = (partial_past_key_values.get_seq_length() + total_tokens + 1 <= partial_past_key_values.cache_config.total_budget) # with a sampled token
     return (enabled and initialized and capacity)
 
-
+# from .profile import record_time
 # @record_time("verify")
 def tree_decoding(
     model,

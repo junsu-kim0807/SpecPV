@@ -261,6 +261,8 @@ class PartialKVCache(Cache):
 
 # from pytorch_memlab import profile
 # @profile
+# from ..speculate.profile import record_time
+# @record_time("init_kv_cache")
 def initialize_past_key_values(model, draft_model, max_length=8192, offloading=False):
     config = model.config
     

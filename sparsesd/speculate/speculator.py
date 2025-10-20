@@ -204,14 +204,7 @@ class Speculator(nn.Module):
             metrics = {"new_token": 0, "accept_lengths": []}
 
         # Initialize the past key and value states
-        if hasattr(self, "full_past_key_values"):
-            full_past_key_values = self.full_past_key_values
-            partial_past_key_values = self.partial_past_key_values
-            draft_past_key_values = self.draft_past_key_values
-            full_past_key_values.reset()
-            partial_past_key_values.reset()
-            draft_past_key_values.reset()
-        else:
+        if (not hasattr(self, "full_past_key_values")) or (self.max_length < max_length) or (self.max_length > 1.5 * max_length):
             (
                 full_past_key_values,
                 partial_past_key_values,
@@ -220,6 +213,14 @@ class Speculator(nn.Module):
             self.full_past_key_values = full_past_key_values
             self.partial_past_key_values = partial_past_key_values
             self.draft_past_key_values = draft_past_key_values
+            self.max_length = max_length
+        else:
+            full_past_key_values = self.full_past_key_values
+            partial_past_key_values = self.partial_past_key_values
+            draft_past_key_values = self.draft_past_key_values
+            full_past_key_values.reset()
+            partial_past_key_values.reset()
+            draft_past_key_values.reset()
         full_past_key_values.enabled = True
 
         input_len = input_ids.shape[1]
@@ -240,7 +241,7 @@ class Speculator(nn.Module):
             self.base_model.model.tree_mask = tree_mask
             draft_tokens = draft_tokens.to(input_ids.device)
 
-            if input_ids.shape[1] > partial_past_key_values.cache_config.total_budget and True:
+            if input_ids.shape[1] > partial_past_key_values.cache_config.total_budget and False:
                 partial_past_key_values.init_key_values(full_past_key_values)
 
             # Target model forward, get logits
