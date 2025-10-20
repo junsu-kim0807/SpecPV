@@ -9,7 +9,7 @@ from transformers import AutoConfig, AutoTokenizer
 from ..kv.kv_cache import initialize_past_key_values
 from ..models.modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
 from ..models.modeling_qwen3_kv import Qwen3ForCausalLM as KVQwen3ForCausalLM
-from .configs import EConfig
+from .configs import EConfig, SpecConfig
 from .draft import DraftAdapter
 from .utils import (chunked_prefilling, evaluate_posterior,
                     prepare_logits_processor, reset_tree_mode, tree_decoding,
@@ -186,6 +186,7 @@ class Speculator(nn.Module):
         max_length=2048,
         log=False,
         is_llama3=False,
+        spec_config=None
     ):
         """
         Generate text using Eagle3 draft layer.
@@ -202,6 +203,8 @@ class Speculator(nn.Module):
         input_ids = input_ids.clone()
         if log:
             metrics = {"new_token": 0, "accept_lengths": []}
+        if spec_config is None:
+            spec_config = SpecConfig()
 
         # Initialize the past key and value states
         if (not hasattr(self, "full_past_key_values")) or (self.max_length < max_length) or (self.max_length > 1.5 * max_length):
@@ -209,7 +212,7 @@ class Speculator(nn.Module):
                 full_past_key_values,
                 partial_past_key_values,
                 draft_past_key_values,
-            ) = initialize_past_key_values(self.base_model, self.ea_layer, max_length=max_length)
+            ) = initialize_past_key_values(self.base_model, self.ea_layer, spec_config, max_length=max_length)
             self.full_past_key_values = full_past_key_values
             self.partial_past_key_values = partial_past_key_values
             self.draft_past_key_values = draft_past_key_values
@@ -241,7 +244,7 @@ class Speculator(nn.Module):
             self.base_model.model.tree_mask = tree_mask
             draft_tokens = draft_tokens.to(input_ids.device)
 
-            if input_ids.shape[1] > partial_past_key_values.cache_config.total_budget and False:
+            if input_ids.shape[1] > partial_past_key_values.cache_config.total_budget and spec_config.enable_partial_kv:
                 partial_past_key_values.init_key_values(full_past_key_values)
 
             # Target model forward, get logits

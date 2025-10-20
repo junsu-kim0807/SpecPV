@@ -263,9 +263,10 @@ class PartialKVCache(Cache):
 # @profile
 # from ..speculate.profile import record_time
 # @record_time("init_kv_cache")
-def initialize_past_key_values(model, draft_model, max_length=8192, offloading=False):
+def initialize_past_key_values(model, draft_model, cache_config, max_length=8192):
     config = model.config
-    
+    offloading = cache_config.enable_offload
+
     # init full kv cache
     full_past_key_values = StaticCache(
         config=config,
@@ -274,10 +275,11 @@ def initialize_past_key_values(model, draft_model, max_length=8192, offloading=F
     )
     
     # init partial kv cache
-    # partial_cache_config = CacheConfig(n_retrieval_blocks=13, n_spec_tokens_buf=75)
-    partial_cache_config = CacheConfig(n_retrieval_blocks=128, n_spec_tokens_buf=70)
-    print(partial_cache_config.total_budget)
-    # print("Total Budget", partial_cache_config.total_budget)
+    partial_cache_config = CacheConfig(
+        block_size=cache_config.block_size, 
+        n_retrieval_blocks=cache_config.n_retrieval_blocks, 
+        n_spec_tokens_buf=cache_config.n_spec_tokens_buf
+    )
     partial_past_key_values = PartialKVCache(cache_config=partial_cache_config, model_config=config, dtype=model.dtype, max_length=max_length)
 
     # init draft kv cache

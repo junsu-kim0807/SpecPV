@@ -1,4 +1,17 @@
 from transformers.configuration_utils import PretrainedConfig
+from dataclasses import dataclass
+
+@dataclass
+class SpecConfig:
+    # enabled values
+    enable_offload: bool = False
+    enable_partial_kv: bool = True
+    
+    # partial kv 
+    block_size: int = 16
+    n_retrieval_blocks: int = 256      
+    n_spec_tokens_buf: int = 80       
+
 
 
 class EConfig(PretrainedConfig):
