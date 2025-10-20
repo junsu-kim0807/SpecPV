@@ -301,7 +301,7 @@ class Speculator(nn.Module):
         else:
             metrics["new_token"] = new_token
             avg_accept_len = sum(metrics["accept_lengths"]) / len(metrics["accept_lengths"]) 
-            metrics["avg_accept_len"] = avg_accept_len
+            metrics["avg_accept_lengths"] = avg_accept_len
             return input_ids, metrics
 
     @torch.no_grad()
