@@ -65,6 +65,10 @@ class Speculator(nn.Module):
         self.ea_layer.to(self.base_model.dtype).to(device)
         self.ea_layer.init_tree()
 
+        # set kernel type
+        self.base_model.config._attn_implementation = "sdpa"
+        self.ea_layer.config._attn_implementation = "sdpa"
+
     def _init_draft_layer(self, config, total_token, depth, top_k, threshold):
         if not self.use_eagle3:
             raise NotImplementedError("Only Eagle3 draft layer is supported.")
@@ -305,7 +309,7 @@ class Speculator(nn.Module):
         else:
             metrics["new_token"] = new_token
             avg_accept_len = sum(metrics["accept_lengths"]) / len(metrics["accept_lengths"]) 
-            metrics["avg_accept_lengths"] = avg_accept_len
+            metrics["avg_accept_length"] = avg_accept_len
             return input_ids, metrics
 
     @torch.no_grad()

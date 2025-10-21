@@ -551,6 +551,7 @@ class LlamaModel(LlamaPreTrainedModel):
             inputs_embeds,
             past_key_values_length,
         )
+        attention_mask = attention_mask.to(dtype=inputs_embeds.dtype) if attention_mask is not None else None
 
         # decoder layers
         hidden_states = inputs_embeds
