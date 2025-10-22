@@ -55,11 +55,13 @@ def get_pred(rank, data, max_gen, prompt_format, dataset, device, model_path, dr
 
         input = tokenizer([prompt], return_tensors="pt").to(device)
         context_length = input.input_ids.shape[-1]
+        is_llama3 = True if "llama3" in model_name else False
         output = model.spec_generate(
             input_ids=input.input_ids,
             max_new_tokens=max_gen,
             max_length=context_length+max_gen+100,
             temperature=0.0,
+            is_llama3=is_llama3,
             spec_config=spec_config
         )
         pred = tokenizer.decode(output[0][context_length:], skip_special_tokens=True)

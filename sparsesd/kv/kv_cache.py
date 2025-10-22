@@ -278,7 +278,7 @@ def initialize_past_key_values(model, draft_model, cache_config, max_length=8192
     partial_cache_config = CacheConfig(
         block_size=cache_config.block_size, 
         n_retrieval_blocks=cache_config.n_retrieval_blocks, 
-        n_spec_tokens_buf=cache_config.n_spec_tokens_buf
+        n_spec_tokens_buf=cache_config.partial_spec_tokens + draft_model.total_tokens + 1
     )
     partial_past_key_values = PartialKVCache(cache_config=partial_cache_config, model_config=config, dtype=model.dtype, max_length=max_length)
 
