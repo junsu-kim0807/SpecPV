@@ -5,12 +5,12 @@ from dataclasses import dataclass
 class SpecConfig:
     # enabled values
     enable_offload: bool = False
-    enable_partial_kv: bool = True
+    enable_partial_kv: bool = False
     
     # partial kv 
     block_size: int = 16
     n_retrieval_blocks: int = 256      
-    n_spec_tokens_buf: int = 80       
+    partial_spec_tokens: int = 20       
 
 
 
