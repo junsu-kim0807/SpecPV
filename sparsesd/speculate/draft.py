@@ -373,7 +373,7 @@ class LlamaAttention(nn.Module):
         self.o_proj = nn.Linear(
             self.num_heads * self.head_dim, self.hidden_size, bias=False
         )
-        self._init_rope() # TODO: Long-Context scaling
+        self._init_rope() 
 
     def _init_rope(self):
         if self.config.rope_scaling is None:

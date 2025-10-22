@@ -38,5 +38,6 @@ Thumbs.db
 .pytest_cache/
 .tox/
 
-# test datasets
+# datasets and evaluation results
 data/
+outputs/
