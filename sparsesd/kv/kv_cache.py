@@ -142,7 +142,7 @@ class PartialKVCache(Cache):
 
     # from ..speculate.profile import record_time
     # @record_time("refresh_kv_cache")
-    def refresh_retrieval(self, query_states, key_states, value_states, seq_len, layer_idx: int, reduce_type: str="max"):
+    def refresh_retrieval(self, query_states, key_states, value_states, seq_len, layer_idx: int, reduce_type: str="mean"):
         # 1. update summary_key_states
         retrieval_len = seq_len - self.cache_config.window_size
         self.summary_key_states(key_states, retrieval_len, layer_idx)
@@ -158,13 +158,12 @@ class PartialKVCache(Cache):
         scores = torch.maximum(sim_max, sim_min)  
 
         # 3. reduce scores [B,H,N]
-        scores = scores.squeeze(2)  # disgard dim
-        # if reduce_type == "max":
-            # scores = scores.max(dim=2).values  
-        # elif reduce_type == "mean":
-            # scores = scores.mean(dim=2)        
-        # else:
-            # raise ValueError(f"Unknown reduce_type: {reduce_type}")
+        if reduce_type == "max":
+            scores = scores.max(dim=2).values  
+        elif reduce_type == "mean":
+            scores = scores.mean(dim=2)        
+        else:
+            raise ValueError(f"Unknown reduce_type: {reduce_type}")
         if n_rep > 1:
             # for GQA
             B, H, N = scores.shape
