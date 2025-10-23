@@ -104,6 +104,8 @@ class PartialKVCache(Cache):
             self.summary_block_count.append(0)
             self.verified_lens.append(0)
 
+    # from ..speculate.profile import record_time
+    # @record_time("summary_key_states")
     def summary_key_states(self, key_states, seq_len, layer_idx: int):
         """
         Incrementally update the max/min values of summary_key_states[layer_idx].
@@ -114,18 +116,22 @@ class PartialKVCache(Cache):
         existing_blocks = self.summary_block_count[layer_idx]
         expected_blocks = max(0, (seq_len - sink_size) // block_size)
 
+        if expected_blocks <= existing_blocks:
+            return
         # update incrementally
-        for block_idx in range(existing_blocks, expected_blocks):
-            start = sink_size + block_idx * block_size
-            end = start + block_size
-            if end > seq_len:
-                break  # not fill a block
-            block_key_states = key_states[:, :, start:end, :]
-            k_max = block_key_states.max(dim=2).values
-            k_min = block_key_states.min(dim=2).values
-            self.key_states_summary[layer_idx]["max"][:, :, block_idx, :] = k_max
-            self.key_states_summary[layer_idx]["min"][:, :, block_idx, :] = k_min
-            self.summary_block_count[layer_idx] += 1
+        start = sink_size + existing_blocks * block_size
+        end = start + (expected_blocks - existing_blocks) * block_size
+        new_keys = key_states[:, :, start:end, :]              # [B,H,L_new,D]
+        B, H, L, D = new_keys.shape
+        n_blocks = L // block_size
+        new_keys = new_keys[:, :, :n_blocks * block_size, :].reshape(B, H, n_blocks, block_size, D)
+        k_max = new_keys.max(dim=3).values                     # [B,H,n_blocks,D]
+        k_min = new_keys.min(dim=3).values
+        dst_max = self.key_states_summary[layer_idx]["max"][:, :, existing_blocks:existing_blocks + n_blocks, :]
+        dst_min = self.key_states_summary[layer_idx]["min"][:, :, existing_blocks:existing_blocks + n_blocks, :]
+        dst_max.copy_(k_max)
+        dst_min.copy_(k_min)
+        self.summary_block_count[layer_idx] += n_blocks
 
     def add_to_sink(self, key_states, value_states, layer_idx: int):
         sink_size = self.cache_config.sink_size
@@ -134,8 +140,9 @@ class PartialKVCache(Cache):
         self.key_cache[layer_idx]["sink"][:, :, :sink_size, :] = k
         self.value_cache[layer_idx]["sink"][:, :, :sink_size, :] = v
 
+    # from ..speculate.profile import record_time
+    # @record_time("refresh_kv_cache")
     def refresh_retrieval(self, query_states, key_states, value_states, seq_len, layer_idx: int, reduce_type: str="max"):
-        # print(query_states.shape)
         # 1. update summary_key_states
         retrieval_len = seq_len - self.cache_config.window_size
         self.summary_key_states(key_states, retrieval_len, layer_idx)
@@ -151,12 +158,13 @@ class PartialKVCache(Cache):
         scores = torch.maximum(sim_max, sim_min)  
 
         # 3. reduce scores [B,H,N]
-        if reduce_type == "max":
-            scores = scores.max(dim=2).values  
-        elif reduce_type == "mean":
-            scores = scores.mean(dim=2)        
-        else:
-            raise ValueError(f"Unknown reduce_type: {reduce_type}")
+        scores = scores.squeeze(2)  # disgard dim
+        # if reduce_type == "max":
+            # scores = scores.max(dim=2).values  
+        # elif reduce_type == "mean":
+            # scores = scores.mean(dim=2)        
+        # else:
+            # raise ValueError(f"Unknown reduce_type: {reduce_type}")
         if n_rep > 1:
             # for GQA
             B, H, N = scores.shape
@@ -280,7 +288,7 @@ def initialize_past_key_values(model, draft_model, cache_config, max_length=8192
         n_retrieval_blocks=cache_config.n_retrieval_blocks, 
         n_spec_tokens_buf=cache_config.partial_spec_tokens + draft_model.total_tokens + 1
     )
-    partial_past_key_values = PartialKVCache(cache_config=partial_cache_config, model_config=config, dtype=model.dtype, max_length=max_length)
+    partial_past_key_values = PartialKVCache(cache_config=partial_cache_config, model_config=config, dtype=model.dtype, max_length=max_length, device=next(model.parameters()).device)
 
     # init draft kv cache
     draft_past_key_values = StaticCache(
