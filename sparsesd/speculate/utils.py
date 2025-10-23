@@ -148,7 +148,6 @@ def tree_decoding(
         partial_past_key_values=partial_cache,
         position_ids=position_ids,
     )
-    tree_logits = tree_logits[:, missing_lens:, :]
 
     if model.use_eagle3:
         ea_device = model.ea_layer.lm_head.weight.device
@@ -157,6 +156,10 @@ def tree_decoding(
                 x.to(ea_device) for x in outputs["hidden_states"]
             ]
         hidden_state = torch.cat(outputs["hidden_states"], dim=-1)
+
+    # remember to remove the missing tokens
+    hidden_state = hidden_state[:, missing_lens:, :]
+    tree_logits = tree_logits[:, missing_lens:, :]
 
     logits = tree_logits[0, retrieve_indices]
     return logits, hidden_state, outputs
