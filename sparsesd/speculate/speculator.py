@@ -207,8 +207,6 @@ class Speculator(nn.Module):
         input_ids = input_ids.clone()
         if log:
             metrics = {"new_token": 0, "accept_lengths": []}
-            torch.cuda.synchronize()
-            start_time = time.time()
         if spec_config is None:
             spec_config = SpecConfig()
 
@@ -244,6 +242,10 @@ class Speculator(nn.Module):
             hidden_state,
             sample_token,
         ) = chunked_prefilling(input_ids, self, full_past_key_values, draft_past_key_values, logits_processor)
+        if log:
+            # decoding start
+            torch.cuda.synchronize()
+            start_time = time.time()
         new_token = 0
         max_length = max_length - self.ea_layer.total_tokens - 10
         for idx in range(max_length):
@@ -346,8 +348,6 @@ class Speculator(nn.Module):
         input_ids = input_ids.clone()
         if log:
             metrics = {"new_token": 0 }
-            torch.cuda.synchronize()
-            start_time = time.time()
 
         # Initialize the past key and value states
         spec_config = SpecConfig()
@@ -375,6 +375,10 @@ class Speculator(nn.Module):
         outputs = self.base_model(
             input_ids, past_key_values=full_past_key_values, use_cache=True
         )
+        if log:
+            # decoding start
+            torch.cuda.synchronize()
+            start_time = time.time()
         new_token = 0
         max_length = max_length - self.ea_layer.total_tokens - 10
         for idx in range(max_length):
