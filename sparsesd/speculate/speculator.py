@@ -207,6 +207,8 @@ class Speculator(nn.Module):
         input_ids = input_ids.clone()
         if log:
             metrics = {"new_token": 0, "accept_lengths": []}
+            torch.cuda.synchronize()
+            start_time = time.time()
         if spec_config is None:
             spec_config = SpecConfig()
 
@@ -307,9 +309,14 @@ class Speculator(nn.Module):
         if not log:
             return input_ids
         else:
+            new_token = new_token.item() if isinstance(new_token, torch.Tensor) else new_token
             metrics["new_token"] = new_token
             avg_accept_len = sum(metrics["accept_lengths"]) / len(metrics["accept_lengths"]) 
             metrics["avg_accept_length"] = avg_accept_len.item() if isinstance(avg_accept_len, torch.Tensor) else avg_accept_len
+            torch.cuda.synchronize()
+            end_time = time.time()
+            metrics["total_time"] = end_time - start_time
+            metrics["throughput"] = new_token / metrics["total_time"] if metrics["total_time"] > 0 else 0.0
             return input_ids, metrics
 
     @torch.no_grad()
@@ -337,29 +344,36 @@ class Speculator(nn.Module):
         # Avoid modifying the input_ids in-place
 
         input_ids = input_ids.clone()
-        self.ea_layer.reset_kv()
+        if log:
+            metrics = {"new_token": 0 }
+            torch.cuda.synchronize()
+            start_time = time.time()
 
         # Initialize the past key and value states
-        if hasattr(self, "past_key_values"):
-            past_key_values = self.past_key_values
-            past_key_values_data = self.past_key_values_data
-            current_length_data = self.current_length_data
-            # Reset the past key and value states
-            current_length_data.zero_()
-        else:
+        spec_config = SpecConfig()
+        if (not hasattr(self, "full_past_key_values")) or (self.max_length < max_length) or (self.max_length > 1.5 * max_length):
             (
-                past_key_values,
-                past_key_values_data,
-                current_length_data,
-            ) = initialize_past_key_values(self.base_model, max_length=max_length)
-            self.past_key_values = past_key_values
-            self.past_key_values_data = past_key_values_data
-            self.current_length_data = current_length_data
+                full_past_key_values,
+                partial_past_key_values,
+                draft_past_key_values,
+            ) = initialize_past_key_values(self.base_model, self.ea_layer, spec_config, max_length=max_length)
+            self.full_past_key_values = full_past_key_values
+            self.partial_past_key_values = partial_past_key_values
+            self.draft_past_key_values = draft_past_key_values
+            self.max_length = max_length
+        else:
+            full_past_key_values = self.full_past_key_values
+            partial_past_key_values = self.partial_past_key_values
+            draft_past_key_values = self.draft_past_key_values
+            full_past_key_values.reset()
+            partial_past_key_values.reset()
+            draft_past_key_values.reset()
+        full_past_key_values.enabled = True
 
         input_len = input_ids.shape[1]
         reset_tree_mode(self)
         outputs = self.base_model(
-            input_ids, past_key_values=past_key_values, use_cache=True
+            input_ids, past_key_values=full_past_key_values, use_cache=True
         )
         new_token = 0
         max_length = max_length - self.ea_layer.total_tokens - 10
@@ -373,7 +387,7 @@ class Speculator(nn.Module):
                 input_id = outputs.logits[:, -1:].argmax(dim=-1)
 
             outputs = self.base_model(
-                input_id, use_cache=True, past_key_values=past_key_values
+                input_id, use_cache=True, past_key_values=full_past_key_values
             )
             input_ids = torch.cat([input_ids, input_id], dim=-1)
             new_token += 1
@@ -391,7 +405,13 @@ class Speculator(nn.Module):
         if not log:
             return input_ids
         else:
-            return input_ids, new_token, idx
+            new_token = new_token.item() if isinstance(new_token, torch.Tensor) else new_token
+            metrics["new_token"] = new_token
+            torch.cuda.synchronize()
+            end_time = time.time()
+            metrics["total_time"] = end_time - start_time
+            metrics["throughput"] = new_token / metrics["total_time"] if metrics["total_time"] > 0 else 0.0
+            return input_ids, metrics
 
 
 def profile_total_tokens(model: Speculator):
