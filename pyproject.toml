@@ -3,7 +3,7 @@ requires = ["setuptools>=61", "wheel"]  # Use PEP621
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sparsesd"
+name = "specpv"
 dynamic = ["version"]
 description = "Sparse Speculative Decoding for Efficient Long-Context Generation"
 readme = "README.md"
@@ -32,11 +32,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://example.com/sparsesd"
-Repository = "https://github.com/TanZhendong/SparseSD.git"
+Homepage = "https://example.com/specpv"
+Repository = "https://github.com/TanZhendong/SpecPV.git"
 
 [tool.setuptools.packages.find]
-include = ["sparsesd*"]
+include = ["specpv*"]
 exclude = ["tests*","examples*"]
 
 [tool.setuptools_scm]

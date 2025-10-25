@@ -40,8 +40,8 @@ def process_outputs(file_path: str):
 
 if __name__ == "__main__":
     file_paths = [
-        "/home/lab6033/zhendong/SparseSD/outputs/llama3.1-8b-instruct/qmsum-specpv-2048-20.jsonl",
-        "/home/lab6033/zhendong/SparseSD/outputs/llama3.1-8b-instruct/gov_report-specpv-2048-20.jsonl",
+        "/home/lab6033/zhendong/SpecPV/outputs/llama3.1-8b-instruct/qmsum-specpv-2048-20.jsonl",
+        "/home/lab6033/zhendong/SpecPV/outputs/llama3.1-8b-instruct/gov_report-specpv-2048-20.jsonl",
     ]
     for path in file_paths:
         process_outputs(path)

@@ -9,7 +9,7 @@ import random
 import argparse
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from sparsesd import Speculator, SpecConfig 
+from specpv import Speculator, SpecConfig 
 
 
 def parse_args(args=None):

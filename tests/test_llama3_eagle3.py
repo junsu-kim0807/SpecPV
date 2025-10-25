@@ -1,4 +1,4 @@
-from sparsesd import Speculator
+from specpv import Speculator
 import torch
 
 base_model_path = '/home/lab6033/zhendong/models/LLAMA3.1-8B-Instruct' 

@@ -19,7 +19,7 @@ venv/
 *.sublime-workspace
 
 # build results
-sparsesd.egg-info/
+specpv.egg-info/
 *.dist-info/
 __init__.cpython-*.pyc
 

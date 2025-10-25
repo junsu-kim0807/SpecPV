@@ -1,4 +1,4 @@
-from sparsesd import Speculator
+from specpv import Speculator
 import torch
 
 base_model_path = '/home/lab6033/zhendong/models/LLAMA3.1-8B-Instruct' 
@@ -23,7 +23,7 @@ for seqlen in [1024, 4096, 8192, 16384, 32768]:
         _ = model.spec_generate(input_ids, temperature=0.8, max_new_tokens=128, max_length=35000)
     output = model.spec_generate(input_ids,temperature=0.8, max_new_tokens=1024, max_length=35000)
     # get results
-    from sparsesd.speculate.profile import print_time_stats,reset_time_stats
+    from specpv.speculate.profile import print_time_stats,reset_time_stats
     print("########### seqlen:", seqlen, "###########")
     print_time_stats()
     reset_time_stats()

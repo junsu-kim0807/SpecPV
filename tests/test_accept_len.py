@@ -1,4 +1,4 @@
-from sparsesd import Speculator
+from specpv import Speculator
 import pandas as pd
 import numpy as np
 import torch
@@ -6,7 +6,7 @@ from datasets import load_dataset
 
 base_model_path = "/home/lab6033/zhendong/models/LLAMA3.1-8B-Instruct/"
 #EAGLE_model_path = "/home/lab6033/zhendong/models/eagle/EAGLE3-LLaMA3.1-Instruct-8B/" 
-EAGLE_model_path = "/home/lab6033/hcy/SparseSD/model/llama3-8b-eagle3-64k/"
+EAGLE_model_path = "/home/lab6033/hcy/SpecPV/model/llama3-8b-eagle3-64k/"
 
 # load model
 model = Speculator.from_pretrained(
@@ -22,7 +22,7 @@ model.eval()
 tokenizer = model.tokenizer
 
 
-file_path = "/home/lthpc/nvmessd/hcy/SparseSD/data/pg-19/test_pg19_10k_to_60k.parquet"
+file_path = "/home/lthpc/nvmessd/hcy/SpecPV/data/pg-19/test_pg19_10k_to_60k.parquet"
 df = pd.read_parquet(file_path)
 
 for id in range(6,7):
@@ -58,7 +58,7 @@ for id in range(6,7):
 '''
 
 prompt_format = "Answer the question based on the given passages.\n\nThe following are given passages.\n{context}\n\nAnswer the question based on the given passages.\n\nQuestion: {input}\nLet's think step by step:"
-file_path = "/home/lab6033/hcy/SparseSD/data/longbench-v1/2wikimqa_e.jsonl"
+file_path = "/home/lab6033/hcy/SpecPV/data/longbench-v1/2wikimqa_e.jsonl"
 
 data = load_dataset("json", data_files=file_path, split="train")
 

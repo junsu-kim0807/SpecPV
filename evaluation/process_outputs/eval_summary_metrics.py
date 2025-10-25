@@ -5,8 +5,8 @@ import numpy as np
 from evaluate import load
 
 # === file path ===
-ground_truth_file = "/home/lab6033/zhendong/SparseSD/outputs/llama3.1-8b-instruct/qmsum-full.jsonl"
-target_file = "/home/lab6033/zhendong/SparseSD/outputs/llama3.1-8b-instruct/qmsum-specpv-2048-20.jsonl"
+ground_truth_file = "/home/lab6033/zhendong/SpecPV/outputs/llama3.1-8b-instruct/qmsum-full.jsonl"
+target_file = "/home/lab6033/zhendong/SpecPV/outputs/llama3.1-8b-instruct/qmsum-specpv-2048-20.jsonl"
 
 gt_data = load_dataset("json", data_files=ground_truth_file)["train"]
 tg_data = load_dataset("json", data_files=target_file)["train"]

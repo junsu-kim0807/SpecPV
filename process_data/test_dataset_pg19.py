@@ -93,13 +93,13 @@ def filter_and_truncate_text(df, text_column, target_lengths, tokenizer, samples
 
 if __name__ == "__main__":
     FILE_PATHS = [
-        "/home/lab6033/hcy/SparseSD/data/pg-19/test-00000-of-00001-29a571947c0b5ccc.parquet",
-        "/home/lab6033/hcy/SparseSD/data/pg-19/train-00022-of-00023-5a956eb2a5d6cab5.parquet"
+        "/home/lab6033/hcy/SpecPV/data/pg-19/test-00000-of-00001-29a571947c0b5ccc.parquet",
+        "/home/lab6033/hcy/SpecPV/data/pg-19/train-00022-of-00023-5a956eb2a5d6cab5.parquet"
     ]
     TEXT_COLUMN = "text"  
     TARGET_LENGTHS = [10240, 20480, 30720, 40960, 51200, 61440]
     SAMPLES_PER_LENGTH = 100
-    OUTPUT_FILE = "/home/lab6033/hcy/SparseSD/data/pg-19/test_pg19_600_sentences.parquet"
+    OUTPUT_FILE = "/home/lab6033/hcy/SpecPV/data/pg-19/test_pg19_600_sentences.parquet"
     MODEL_NAME = '/home/lab6033/zhendong/models/LLAMA3.1-8B-Instruct'  
     
     # Load tokenizer
