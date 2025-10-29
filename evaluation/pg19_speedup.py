@@ -32,11 +32,19 @@ def build_chat(tokenizer, text, model_name):
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": text}
     ]
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
+    if "qwen3" in model_name:
+        prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False
+        )
+    else:
+        prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
     return prompt
 
 def post_process(response, model_name):
