@@ -24,7 +24,7 @@ class CacheConfig:
     block_size: int = 16              
     n_sink_blocks: int = 2             
     n_retrieval_blocks: int = 256      
-    n_window_blocks: int = 4        
+    n_window_blocks: int = 8       
     n_spec_tokens_buf: int = 128       
     max_batch_size: int = 1            
 
