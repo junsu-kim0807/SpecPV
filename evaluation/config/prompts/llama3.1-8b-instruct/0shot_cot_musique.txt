@@ -1,0 +1,8 @@
+Answer the question based on the given passages. The following are given passages.
+<text>
+$CONTEXT$
+</text>
+
+Now, answer the question based on the passages: $INPUT$
+
+Let’s think step by step:
