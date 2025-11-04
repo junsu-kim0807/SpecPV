@@ -27,11 +27,19 @@ def build_chat(tokenizer, prompt, model_name):
     messages = [
         {"role": "user", "content": prompt}
     ]
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
+    if "qwen3" in model_name:
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False
+        )
+    else:
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
     return text
 
 def post_process(response, model_name):
@@ -123,7 +131,7 @@ if __name__ == '__main__':
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if args.dataset_name == 'all':
-        datasets = ["gov_report", "qmsum", "multi_news"]
+        datasets = ["gov_report", "qmsum"] # "multi_news"
     else:
         datasets = [args.dataset_name]
     # we design specific prompt format and max generation length for each task, feel free to modify them to optimize model output
