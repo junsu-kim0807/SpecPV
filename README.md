@@ -5,6 +5,7 @@ PyTorch implementation of SpecPV.
 To further accelerate speculative decoding for long-context generation, we introduce SpecPV, a self-speculative decoding approach that performs fast verification using partial key–value (KV) states and periodically applies full verification to eliminate accumulated errors.
 
 We build on a self-speculative decoding paradigm and adopt the [EAGLE3](https://github.com/SafeAILab/EAGLE) draft module. The overall framework is as follows:
+
 <img src="assets/self-spec.png" alt="assets/self-spec.png" style="width: 30%;" />
 
 For short context, we adopt classic full verification, whereas for long context, we use partial verification to improve efficiency. Periodic full verification eliminates accumulated errors and refreshes the partial KV cache. Taken together, these modes balance efficiency and accuracy across different context length.
