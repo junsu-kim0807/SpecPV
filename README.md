@@ -95,4 +95,11 @@ We provide evaluation scripts in the `scripts/` directory. After running them, y
 This project is inspired by [**EAGLE3**](https://github.com/SafeAILab/EAGLE) and [**TriForce**](https://github.com/Infini-AI-Lab/TriForce), and we gratefully acknowledge their excellent work.
 
 ## Citation
-TODO
+```
+@article{tan2025specpv,
+  title={SpecPV: Improving Self-Speculative Decoding for Long-Context Generation via Partial Verification},
+  author={Tan, Zhendong and Zhang, Xingjun and Hu, Chaoyi and Peng, Junjie and Xia, Kun},
+  journal={arXiv preprint arXiv:2512.02337},
+  year={2025}
+}
+```
