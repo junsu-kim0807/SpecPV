@@ -23,7 +23,7 @@ VENV_DIR = "/home/jhwoo36/scratch/venvs/vllm"
 HF_HOME = "/home/jhwoo36/scratch/.cache"
 TRANSFORMERS_CACHE = "/home/jhwoo36/scratch/.cache/transformers"
 HUGGINGFACE_HUB_CACHE = "/home/jhwoo36/scratch/.cache/huggingface_hub"
-HF_DATASETS_CACHE = "/home/jhwoo36/scratch/.cache/datasets"
+HF_DATASETS_CACHE = os.path.expanduser("~/scratch/.cache/datasets")
 
 # 필요하면 생성 전에 쉘에서 export HF_TOKEN=... 해두면 된다.
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
@@ -80,6 +80,8 @@ DRAFT_MODELS: list[ModelConfig] = [
 DATASETS: list[DatasetConfig] = [
     DatasetConfig(name="qmsum"),
     DatasetConfig(name="gov_report"),
+    DatasetConfig(name="aime2025"),
+    DatasetConfig(name="codeelo"),
 ]
 
 METHODS: list[MethodConfig] = [
@@ -201,8 +203,13 @@ def build_python_command(
     draft: ModelConfig,
     target: ModelConfig,
 ) -> str:
+    if dataset.name in ("aime2025", "codeelo"):
+        entry = "evaluation/eval_aime2025_codeelo.py"
+    else:
+        entry = "evaluation/longbenchv1_summarization.py"
+
     args = [
-        "python -u evaluation/longbenchv1_summarization.py",
+        f"python -u {entry}",
         f"--model_path {shquote(target.model_ref)}",
         f"--draft_path {shquote(draft.model_ref)}",
         f"--dataset_name {shquote(dataset.name)}",

@@ -56,6 +56,12 @@ def parse_args(args=None):
         type=str,
         default="outputs",
     )
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="For smoke tests: limit number of samples per dataset.",
+    )
     return parser.parse_args(args)
 
 
@@ -104,6 +110,11 @@ def resolve_dataset_file(dataset_name: str, dataset_path: str | None, dataset_ro
 
     hf_cache = os.environ.get("HF_DATASETS_CACHE")
     if hf_cache:
+        # download_dataset.py exports LongBench v1 under:
+        #   $HF_DATASETS_CACHE/longbenchv1/{subset}.jsonl
+        candidates.append(Path(hf_cache).expanduser() / "longbenchv1" / f"{dataset_name}.jsonl")
+        candidates.append(Path(hf_cache).expanduser() / f"{dataset_name}.jsonl")
+        # Legacy fallback (older experiments)
         candidates.append(Path(hf_cache).expanduser() / "specpv_eval" / "longbenchv1" / f"{dataset_name}.jsonl")
 
     candidates.append(REPO_ROOT / "data" / "longbenchv1" / f"{dataset_name}.jsonl")
@@ -253,13 +264,16 @@ if __name__ == "__main__":
 
         data = load_dataset("json", data_files=str(dataset_file))["train"]
 
+        data_all = [data_sample for data_sample in data]
+        if args.max_samples is not None:
+            data_all = data_all[: args.max_samples]
+
         out_path = model_output_dir / f"{dataset}-{args.method}.jsonl"
         if args.method == "specpv":
             out_path = model_output_dir / f"{dataset}-{args.method}-{args.partial_length}-{args.partial_spec_tokens}.jsonl"
 
         prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
-        data_all = [data_sample for data_sample in data]
         data_subsets = [data_all[i::world_size] for i in range(world_size)]
 
         if out_path.exists():
