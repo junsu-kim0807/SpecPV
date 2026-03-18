@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
 
     # aime/codeelo options
     p.add_argument("--max_new_tokens", type=int, default=256)
+    p.add_argument(
+        "--spec_k",
+        type=int,
+        default=8,
+        help="Vanilla speculative decoding: draft propose length K (used when --method=naive).",
+    )
     return p.parse_args()
 
 
@@ -127,6 +133,8 @@ def main() -> None:
                     str(args.max_samples),
                     "--max_new_tokens",
                     str(args.max_new_tokens),
+                    "--spec_k",
+                    str(args.spec_k),
                 ]
                 if args.method == "specpv":
                     cmd += [
@@ -154,6 +162,8 @@ def main() -> None:
                     output_root,
                     "--max_samples",
                     str(args.max_samples),
+                    "--spec_k",
+                    str(args.spec_k),
                 ]
                 if args.method == "specpv":
                     cmd += [
