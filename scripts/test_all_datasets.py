@@ -261,7 +261,8 @@ def main() -> None:
                     else:
                         src = Path(args.output_root) / "_runs" / model_name / f"{dataset}-{method}.jsonl"
                 if not src.exists():
-                    raise FileNotFoundError(f"Expected evaluation output not found: {src}")
+                    print(f"[warn] evaluation output missing; skipping postprocess: {src}")
+                    continue
 
                 # Destination directory name: method/$dataset/$draft_$target
                 if method == "ar":

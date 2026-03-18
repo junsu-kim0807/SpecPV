@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -114,23 +115,58 @@ class Speculator(nn.Module):
             raise NotImplementedError("The model is not implemented yet.")
 
         # download or load from disk eagle weights
-        configpath = os.path.join(ea_model_path, "config.json")
-        if not os.path.exists(configpath):
-            configpath = hf_hub_download(ea_model_path, "config.json")
-        try:
-            load_model_path = os.path.join(ea_model_path, "pytorch_model.bin")
-            if not os.path.exists(load_model_path):
-                load_model_path = hf_hub_download(ea_model_path, "pytorch_model.bin")
-            ea_layer_state_dict = torch.load(
-                load_model_path, map_location=base_model.device
-            )
-        except:
-            from safetensors.torch import load_file
+        #
+        # `ea_model_path` is sometimes passed as a local filesystem path
+        # (e.g. `/home/.../models/eagle/EAGLE3-...`). In that case,
+        # HuggingFace helpers will treat it as an invalid repo_id, so we must
+        # resolve local files ourselves.
+        ea_path = Path(ea_model_path)
+        if ea_path.exists():
+            # Prefer top-level config.json, otherwise search shallowly.
+            config_candidates = [ea_path / "config.json"]
+            config_candidates.extend(list(ea_path.rglob("config.json")))
+            config_candidates = [p for p in config_candidates if p.exists()]
+            if not config_candidates:
+                raise FileNotFoundError(
+                    f"Could not find eagle config.json under local path: {ea_model_path}"
+                )
+            configpath = sorted(config_candidates, key=lambda p: len(p.parts))[0]
 
-            load_model_path = os.path.join(ea_model_path, "model.safetensors")
-            if not os.path.exists(load_model_path):
+            # Resolve weights file
+            weights_candidates = [ea_path / "pytorch_model.bin", ea_path / "model.safetensors"]
+            weights_candidates.extend(list(ea_path.rglob("pytorch_model.bin")))
+            weights_candidates.extend(list(ea_path.rglob("model.safetensors")))
+            weights_candidates = [p for p in weights_candidates if p.exists()]
+            if not weights_candidates:
+                raise FileNotFoundError(
+                    f"Could not find eagle weights (pytorch_model.bin or model.safetensors) under local path: {ea_model_path}"
+                )
+            # Prefer exact top-level matches if present.
+            top_level = [p for p in weights_candidates if p.parent == ea_path]
+            weights_path = (sorted(top_level, key=lambda p: len(p.parts))[0] if top_level else sorted(weights_candidates, key=lambda p: len(p.parts))[0])
+        else:
+            # Treat as HF repo id
+            configpath = hf_hub_download(ea_model_path, "config.json")
+            # Resolve weights lazily below.
+            weights_path = None
+        if weights_path is not None:
+            # Local path weights
+            if str(weights_path).endswith(".safetensors"):
+                from safetensors.torch import load_file
+
+                ea_layer_state_dict = load_file(str(weights_path))
+            else:
+                ea_layer_state_dict = torch.load(str(weights_path), map_location=base_model.device)
+        else:
+            # HF repo id weights
+            try:
+                load_model_path = hf_hub_download(ea_model_path, "pytorch_model.bin")
+                ea_layer_state_dict = torch.load(load_model_path, map_location=base_model.device)
+            except Exception:
+                from safetensors.torch import load_file
+
                 load_model_path = hf_hub_download(ea_model_path, "model.safetensors")
-            ea_layer_state_dict = load_file(load_model_path)
+                ea_layer_state_dict = load_file(load_model_path)
 
         # init model
         model = cls(
