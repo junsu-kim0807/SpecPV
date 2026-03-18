@@ -151,7 +151,9 @@ class EConfig(PretrainedConfig):
                 "`rope_scaling` must be a dictionary with with two fields, `name` and `factor`, "
                 f"got {self.rope_scaling}"
             )
-        rope_scaling_type = self.rope_scaling.get("type", None)
+        # Transformers/LLM checkpoints are inconsistent about whether the key is
+        # called `type` or `name`. Accept both.
+        rope_scaling_type = self.rope_scaling.get("type", None) or self.rope_scaling.get("name", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
         if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic", "yarn"]:
             raise ValueError(
@@ -159,8 +161,8 @@ class EConfig(PretrainedConfig):
             )
         if (
             rope_scaling_factor is None
-            or not isinstance(rope_scaling_factor, float)
-            or rope_scaling_factor <= 1.0
+            or not isinstance(rope_scaling_factor, (int, float))
+            or float(rope_scaling_factor) <= 1.0
         ):
             raise ValueError(
                 f"`rope_scaling`'s factor field must be an float > 1, got {rope_scaling_factor}"

@@ -476,18 +476,21 @@ def main() -> None:
         evaluated = 0
 
         code_submitted = 0
-        with open(out_path, "r", encoding="utf-8") as f:
-            for line in f:
-                total += 1
-                obj = json.loads(line)
-                if obj.get("evaluated"):
-                    evaluated += 1
-                    if obj.get("correct"):
-                        correct += 1
-                if dataset_name == "codeelo":
-                    sub = obj.get("codeelo_submission") or {}
-                    if sub.get("code"):
-                        code_submitted += 1
+        if not out_path.exists():
+            print(f"[metrics] WARNING: output jsonl not found: {out_path} (worker likely crashed).")
+        else:
+            with open(out_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    total += 1
+                    obj = json.loads(line)
+                    if obj.get("evaluated"):
+                        evaluated += 1
+                        if obj.get("correct"):
+                            correct += 1
+                    if dataset_name == "codeelo":
+                        sub = obj.get("codeelo_submission") or {}
+                        if sub.get("code"):
+                            code_submitted += 1
 
         metrics_path = model_output_dir / f"{dataset_name}-{args.method}-metrics.json"
         if dataset_name == "aime2025":
