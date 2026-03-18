@@ -183,6 +183,36 @@ def normalize_codeelo_text(s: str) -> str:
     return s
 
 
+def extract_first_code_block(text: str) -> tuple[str | None, str]:
+    """
+    Returns (lang_tag, code).
+    If no code fence exists, returns (None, whole_text).
+    """
+    # Match ```lang\n...\n``` or ```\n...\n```
+    m = re.search(r"```(\w+)?\n(.*?)\n```", text, flags=re.DOTALL)
+    if not m:
+        return None, text.strip()
+    lang = (m.group(1) or "").strip().lower() or None
+    code = (m.group(2) or "").strip()
+    return lang, code
+
+
+def extract_codeelo_lang_tag(model_output: str) -> str | None:
+    lang, _code = extract_first_code_block(model_output)
+    return lang
+
+
+def get_codeelo_code_and_lang(model_output: str) -> tuple[str | None, str]:
+    lang, code = extract_first_code_block(model_output)
+    return lang, code
+
+
+def extract_contest_id_from_prob(prob: str) -> str | None:
+    # Common format: "2000A" / "1980B" etc.
+    m = re.match(r"(\d+)", prob.strip())
+    return m.group(1) if m else None
+
+
 def build_user_prompt(dataset_name: str, row: dict[str, Any]) -> tuple[str, str | None]:
     if dataset_name == "aime2025":
         question = str(row.get("question", row.get("problem", row.get("input", "")))).strip()
@@ -195,16 +225,19 @@ def build_user_prompt(dataset_name: str, row: dict[str, Any]) -> tuple[str, str 
         return user_prompt, system_prompt
 
     if dataset_name == "codeelo":
+        # CodeElo expects generated code that can be submitted to Codeforces.
+        # We store a "submission-ready response" by forcing the model to output
+        # complete source code in one fenced code block labeled `cpp`.
         desc = str(row.get("description", "")).strip()
         inp = str(row.get("input", "")).strip()
         note = str(row.get("note", "")).strip()
-
         interaction = str(row.get("interaction", "")).strip()
 
         system_prompt = (
             "You are a competitive programming assistant. "
-            "Given the problem statement and the sample input, "
-            "write the exact sample output. Output only the output text, no explanations."
+            "Write a complete C++ solution for the given problem. "
+            "Output only the complete code inside a single fenced block with language tag `cpp`. "
+            "Do not include any explanations or additional text."
         )
 
         parts: list[str] = []
@@ -214,10 +247,10 @@ def build_user_prompt(dataset_name: str, row: dict[str, Any]) -> tuple[str, str 
             parts.append(f"Note:\n{note}")
         if inp:
             parts.append(f"Sample Input:\n{inp}")
-        elif interaction:
+        if interaction:
             parts.append(f"Interaction:\n{interaction}")
 
-        parts.append("Sample Output (exactly):")
+        parts.append("Now write the complete C++ code for this problem.")
         return "\n\n".join(parts), system_prompt
 
     raise ValueError(f"Unsupported dataset_name={dataset_name}")
@@ -227,8 +260,7 @@ def get_gold_answer(dataset_name: str, row: dict[str, Any]) -> str:
     if dataset_name == "aime2025":
         return str(row.get("answer", "")).strip()
     if dataset_name == "codeelo":
-        # CodeElo row typically has `output` as the reference sample output.
-        # (The dataset is used here as "output text accuracy".)
+        # Reference sample output (used only for optional local sanity checks).
         return str(row.get("output", row.get("answer", ""))).strip()
     raise ValueError(f"Unsupported dataset_name={dataset_name}")
 
@@ -306,11 +338,22 @@ def get_pred(
             correct = evaluated and (pred_norm == gold_norm)
         elif dataset_name == "codeelo":
             pred_output = extract_codeelo_output(pred_raw)
-            correct = evaluated and (normalize_codeelo_text(pred_output) == normalize_codeelo_text(gold))
+            # Official CodeElo uses code execution on Codeforces.
+            # We do NOT compute official accuracy here; this is submission-prep stage.
+            evaluated = False
+            correct = False
+
+            codeelo_lang_tag, codeelo_code = get_codeelo_code_and_lang(pred_raw)
+            prob = json_obj.get("_id", json_obj.get("id", json_obj.get("prob", None)))
+            if prob is None:
+                prob = ""
+            prob_str = str(prob)
+            contest_id = extract_contest_id_from_prob(prob_str) if prob_str else None
         else:
             raise ValueError(dataset_name)
 
         with open(out_path, "a", encoding="utf-8") as f:
+            prob_id = json_obj.get("_id", json_obj.get("id", json_obj.get("prob", None)))
             json.dump(
                 {
                     "id": json_obj.get("_id", json_obj.get("id", None)),
@@ -319,6 +362,16 @@ def get_pred(
                     "gold": gold,
                     "evaluated": evaluated,
                     "correct": correct,
+                    "codeelo_submission": (
+                        {
+                            "prob": prob_id,
+                            "contest_id": extract_contest_id_from_prob(str(prob_id)) if prob_id else None,
+                            "lang_tag": codeelo_lang_tag if dataset_name == "codeelo" else None,
+                            "code": codeelo_code if dataset_name == "codeelo" else None,
+                        }
+                        if dataset_name == "codeelo"
+                        else None
+                    ),
                 },
                 f,
                 ensure_ascii=False,
@@ -418,9 +471,11 @@ def main() -> None:
             p.join()
 
         # Compute accuracy from the generated jsonl.
+        total = 0
         correct = 0
         evaluated = 0
-        total = 0
+
+        code_submitted = 0
         with open(out_path, "r", encoding="utf-8") as f:
             for line in f:
                 total += 1
@@ -429,26 +484,35 @@ def main() -> None:
                     evaluated += 1
                     if obj.get("correct"):
                         correct += 1
-
-        acc = (correct / evaluated * 100.0) if evaluated else 0.0
-        print(f"[metrics] dataset={dataset_name} evaluated={evaluated}/{total} accuracy={acc:.3f}")
+                if dataset_name == "codeelo":
+                    sub = obj.get("codeelo_submission") or {}
+                    if sub.get("code"):
+                        code_submitted += 1
 
         metrics_path = model_output_dir / f"{dataset_name}-{args.method}-metrics.json"
-        metrics_path.write_text(
-            json.dumps(
-                {
-                    "dataset": dataset_name,
-                    "method": args.method,
-                    "evaluated": evaluated,
-                    "total": total,
-                    "accuracy": acc,
-                    "correct": correct,
-                },
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+        if dataset_name == "aime2025":
+            acc = (correct / evaluated * 100.0) if evaluated else 0.0
+            print(f"[metrics] dataset={dataset_name} evaluated={evaluated}/{total} accuracy={acc:.3f}")
+            metrics = {
+                "dataset": dataset_name,
+                "method": args.method,
+                "evaluated": evaluated,
+                "total": total,
+                "accuracy": acc,
+                "correct": correct,
+            }
+        else:
+            # For CodeElo, official scoring requires submission+execution on Codeforces.
+            print(f"[metrics] dataset={dataset_name} code_extracted={code_submitted}/{total} (no local accuracy)")
+            metrics = {
+                "dataset": dataset_name,
+                "method": args.method,
+                "total": total,
+                "code_extracted": code_submitted,
+                "note": "Official CodeElo scoring requires CodeElo submission; use scripts/codeelo_submit_and_score.py.",
+            }
+
+        metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 if __name__ == "__main__":
