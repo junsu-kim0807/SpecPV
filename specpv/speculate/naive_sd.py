@@ -9,6 +9,22 @@ from .profile import record_time
 from . import utils as sd_utils  # for optional logits_processor hooks
 
 
+def _tok_prob_from_logits(*, logits: torch.Tensor, tok_id: int) -> float:
+    """
+    Compute P(token=tok_id | logits) without materializing a full softmax tensor.
+    logits: [1, vocab] or [vocab]
+    """
+    if logits.dim() == 2:
+        tok_logit = logits[0, tok_id]
+        log_denom = torch.logsumexp(logits[0], dim=-1)
+    elif logits.dim() == 1:
+        tok_logit = logits[tok_id]
+        log_denom = torch.logsumexp(logits, dim=-1)
+    else:
+        raise ValueError(f"Unexpected logits shape: {tuple(logits.shape)}")
+    return float(torch.exp(tok_logit - log_denom).item())
+
+
 def _build_stop_ids(*, tokenizer, is_llama3: bool) -> list[int]:
     stop_ids: list[int] = []
     if is_llama3:
@@ -56,11 +72,10 @@ def propose_tokens_greedy(
             if isinstance(processed, (tuple, list)):
                 processed = processed[0]
             next_logits = processed
-        q_probs = torch.softmax(next_logits, dim=-1)
-        next_token = torch.argmax(q_probs, dim=-1, keepdim=True)  # [1,1]
+        next_token = torch.argmax(next_logits, dim=-1, keepdim=True)  # [1,1]
         tok = int(next_token.item())
         proposed.append(tok)
-        q_token_probs.append(float(q_probs[0, tok].item()))
+        q_token_probs.append(_tok_prob_from_logits(logits=next_logits, tok_id=tok))
         temp_ids = torch.cat([temp_ids, next_token], dim=1)
 
     return proposed, q_token_probs
@@ -135,9 +150,8 @@ def vanilla_speculative_decode(
                         break
 
                     # 1) Draft proposes greedily from current draft logits.
-                    q_probs = torch.softmax(logits_draft, dim=-1)
-                    tok = int(torch.argmax(q_probs, dim=-1).item())
-                    q_tok_prob = float(q_probs[0, tok].item())
+                    tok = int(torch.argmax(logits_draft, dim=-1).item())
+                    q_tok_prob = _tok_prob_from_logits(logits=logits_draft, tok_id=tok)
                     proposed_counts_per_pos[pos] += 1
 
                     # 2) Target verifies using current target logits.
@@ -148,8 +162,7 @@ def vanilla_speculative_decode(
                         p_logits = processed
                     else:
                         p_logits = logits_target
-                    p_probs = torch.softmax(p_logits, dim=-1)
-                    p_tok_prob = float(p_probs[0, tok].item())
+                    p_tok_prob = _tok_prob_from_logits(logits=p_logits, tok_id=tok)
 
                     # Acceptance probability a = min(1, p/q)
                     if q_tok_prob <= 0:
@@ -195,7 +208,7 @@ def vanilla_speculative_decode(
                     else:
                         # Reject: append deterministic argmax from target distribution.
                         rejected = True
-                        next_tok_tensor = torch.argmax(p_probs, dim=-1, keepdim=True)
+                        next_tok_tensor = torch.argmax(p_logits, dim=-1, keepdim=True)
                         next_tok = int(next_tok_tensor.item())
                         output_ids = torch.cat(
                             [
@@ -246,8 +259,7 @@ def vanilla_speculative_decode(
                         if isinstance(processed, (tuple, list)):
                             processed = processed[0]
                         bonus_logits = processed
-                    bonus_probs = torch.softmax(bonus_logits, dim=-1)
-                    bonus_next_tok = int(torch.argmax(bonus_probs, dim=-1).item())
+                    bonus_next_tok = int(torch.argmax(bonus_logits, dim=-1).item())
 
                     output_ids = torch.cat(
                         [
@@ -351,8 +363,7 @@ def vanilla_speculative_decode(
                 if isinstance(processed, (tuple, list)):
                     processed = processed[0]
                 p_logits = processed
-            p_probs = torch.softmax(p_logits, dim=-1)
-            p_tok_prob = float(p_probs[0, tok].item())
+            p_tok_prob = _tok_prob_from_logits(logits=p_logits, tok_id=tok)
             q_tok_prob = q_token_probs[i]
 
             # Acceptance probability a = min(1, p/q)
@@ -375,7 +386,7 @@ def vanilla_speculative_decode(
             else:
                 # Reject: append deterministic argmax from target distribution.
                 rejected = True
-                next_token = torch.argmax(p_probs, dim=-1, keepdim=True)  # [1,1]
+                next_token = torch.argmax(p_logits, dim=-1, keepdim=True)  # [1,1]
                 next_tok = int(next_token.item())
                 output_ids = torch.cat(
                     [output_ids, torch.tensor([[next_tok]], device=device, dtype=torch.long)], dim=1
@@ -404,8 +415,7 @@ def vanilla_speculative_decode(
                 if isinstance(processed, (tuple, list)):
                     processed = processed[0]
                 bonus_logits = processed
-            bonus_probs = torch.softmax(bonus_logits, dim=-1)
-            bonus_next_tok = int(torch.argmax(bonus_probs, dim=-1).item())
+            bonus_next_tok = int(torch.argmax(bonus_logits, dim=-1).item())
 
             output_ids = torch.cat(
                 [
