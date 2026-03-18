@@ -42,3 +42,5 @@ Thumbs.db
 data/
 outputs/
 datasets/
+scripts/jobs/*
+scripts/logs/*

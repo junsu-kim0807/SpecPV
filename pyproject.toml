@@ -1,29 +1,37 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]  # Use PEP621
+requires = [
+  "setuptools>=80",
+  "wheel",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "specpv"
-dynamic = ["version"]
+version = "0.1.0"
 description = "Sparse Speculative Decoding for Efficient Long-Context Generation"
 readme = "README.md"
-requires-python = ">=3.10,<3.12"
-license = { text = "MIT" }  
+requires-python = ">=3.10,<3.14"
+license = "MIT"
 authors = [{ name = "Zhendong Tan" }]
-classifiers = [
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3 :: Only",
-  "License :: OSI Approved :: MIT License",
-  "Operating System :: OS Independent",
-  "Topic :: Scientific/Engineering :: Artificial Intelligence"
-]
 
 dependencies = [
   "transformers>=4.56.0",
-  "trl==0.19.1"
+  "datasets>=2.19",
+  "huggingface_hub>=0.24",
+  "numpy>=1.26",
+  "tqdm>=4.66",
+  "safetensors>=0.4.5",
+  "sentencepiece>=0.2.0",
 ]
 
 [project.optional-dependencies]
+runtime = [
+  "torch==2.10.0",
+  "vllm==0.17.1",
+]
+train = [
+  "trl==0.19.1",
+]
 dev = [
   "pytest>=7",
   "ruff>=0.5",
@@ -32,14 +40,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://example.com/specpv"
 Repository = "https://github.com/TanZhendong/SpecPV.git"
 
-[tool.setuptools.packages.find]
-include = ["specpv*"]
-exclude = ["tests*","examples*"]
-
-[tool.setuptools_scm]
-version_scheme = "post-release"
-local_scheme = "no-local-version"
-fallback_version = "0.1.0"
+[tool.setuptools]
+packages = ["specpv"]
+include-package-data = true
