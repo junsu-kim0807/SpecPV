@@ -17,6 +17,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from specpv import Speculator, SpecConfig
+from specpv.speculate.naive_sd import vanilla_speculative_decode as vanilla_speculative_decode_sd
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -186,10 +187,13 @@ def get_pred(
                 max_length=context_length + max_gen + 100,
                 is_llama3=is_llama3,
             )
+            # draftless decoding: acceptance per speculative position is not defined.
+            # Still keep the list shape consistent for downstream aggregation.
+            metrics["acceptance_rate_per_pos"] = [0.0 for _ in range(spec_k)]
         elif method == "naive":
             if draft_model is None:
                 raise RuntimeError("method=naive requires draft_model.")
-            output, metrics = vanilla_speculative_decode(
+            output, metrics = vanilla_speculative_decode_sd(
                 target_model=target_model,
                 draft_model=draft_model,
                 tokenizer=tokenizer,
@@ -209,6 +213,20 @@ def get_pred(
                 spec_config=spec_config,
                 log=True,
             )
+            # spec_generate returns per-iteration accept lengths.
+            # In Speculator, `accept_length` corresponds to accepted_count - 1,
+            # so position `pos` is accepted iff `pos <= accept_length`.
+            accept_lengths = metrics.get("accept_lengths", []) or []
+            K = int(getattr(spec_config, "partial_spec_tokens", 20) or 20)
+            n = len(accept_lengths)
+            acceptance_rate_per_pos: list[float] = []
+            for pos in range(K):
+                if n <= 0:
+                    acceptance_rate_per_pos.append(0.0)
+                else:
+                    accepted = sum(1 for al in accept_lengths if int(al) >= pos)
+                    acceptance_rate_per_pos.append(accepted / n)
+            metrics["acceptance_rate_per_pos"] = acceptance_rate_per_pos
 
         pred = tokenizer.decode(output[0][context_length:], skip_special_tokens=True)
         pred = post_process(pred, model_name)
@@ -221,6 +239,7 @@ def get_pred(
                     "all_classes": json_obj.get("all_classes"),
                     "length": context_length,
                     "avg_acc_length": metrics["avg_accept_length"],
+                    "acceptance_rate_per_pos": metrics.get("acceptance_rate_per_pos", []),
                     "new_token": metrics["new_token"],
                     "total_time": metrics["total_time"],
                     "throughput": metrics["throughput"],
@@ -287,13 +306,14 @@ def ar_generate_transformers(*, model, tokenizer, input_ids, max_new_tokens: int
 
     return outputs, {
         "avg_accept_length": 0,
+        "acceptance_rate_per_pos": [],
         "new_token": int(new_token),
         "total_time": float(total_time),
         "throughput": float(throughput),
     }
 
 
-def vanilla_speculative_decode(
+def vanilla_speculative_decode_local(
     *,
     target_model,
     draft_model,
@@ -326,6 +346,7 @@ def vanilla_speculative_decode(
     stop_ids = sorted(set(stop_ids))
 
     generated = 0
+    accept_lengths: list[int] = []
     while generated < max_new_tokens and output_ids.shape[1] < max_length:
         # 1) Draft propose K tokens greedily
         base_ids = output_ids
@@ -358,6 +379,7 @@ def vanilla_speculative_decode(
             target_logits = target_out.logits  # [1, L+K, vocab]
 
             stop_reached = False
+            accept_len = 0
             for i, tok in enumerate(proposed):
                 if generated >= max_new_tokens or output_ids.shape[1] >= max_length:
                     break
@@ -379,6 +401,7 @@ def vanilla_speculative_decode(
                     next_token_tensor = torch.tensor([[tok]], device=device, dtype=torch.long)
                     output_ids = torch.cat([output_ids, next_token_tensor], dim=1)
                     generated += 1
+                    accept_len += 1
                     if tok in stop_ids:
                         stop_reached = True
                         break
@@ -394,6 +417,7 @@ def vanilla_speculative_decode(
                     break
 
             # If the model rejected early, loop continues from new output_ids state.
+            accept_lengths.append(accept_len)
             if stop_reached:
                 break
 
@@ -401,8 +425,9 @@ def vanilla_speculative_decode(
     new_token = output_ids.shape[-1] - prompt_len
     throughput = (new_token / total_time) if total_time > 0 else 0.0
 
+    avg_accept_length = (sum(accept_lengths) / len(accept_lengths)) if accept_lengths else 0.0
     return output_ids, {
-        "avg_accept_length": 0,
+        "avg_accept_length": float(avg_accept_length),
         "new_token": int(new_token),
         "total_time": float(total_time),
         "throughput": float(throughput),
@@ -471,6 +496,8 @@ if __name__ == "__main__":
     output_root.mkdir(parents=True, exist_ok=True)
 
     spec_config = SpecConfig()
+    # We do not use KV cache offload for these experiments.
+    spec_config.enable_offload = False
     if args.method == "full":
         spec_config.enable_partial_kv = False
     elif args.method == "specpv":

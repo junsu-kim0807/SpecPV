@@ -18,6 +18,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from specpv import SpecConfig, Speculator
+from specpv.speculate.naive_sd import vanilla_speculative_decode as vanilla_speculative_decode_sd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -326,10 +327,12 @@ def get_pred(
                 max_length=context_length + max_gen + 100,
                 is_llama3=is_llama3,
             )
+            # draftless decoding: keep list shape consistent for aggregation.
+            acceptance_rate_per_pos = [0.0 for _ in range(spec_k)]
         elif method == "naive":
             if draft_model is None:
                 raise RuntimeError("method=naive requires draft_model.")
-            output = vanilla_speculative_decode(
+            output, _metrics = vanilla_speculative_decode_sd(
                 target_model=target_model,
                 draft_model=draft_model,
                 tokenizer=tokenizer,
@@ -339,6 +342,7 @@ def get_pred(
                 is_llama3=is_llama3,
                 spec_k=spec_k,
             )
+            acceptance_rate_per_pos = _metrics.get("acceptance_rate_per_pos", [])
         elif method in ("specpv", "full"):
             # specpv/full: require Speculator (Eagle draft adapters).
             output, _metrics = target_model.spec_generate(
@@ -350,6 +354,13 @@ def get_pred(
                 spec_config=spec_config,
                 log=True,
             )
+            accept_lengths = _metrics.get("accept_lengths", []) or []
+            K = int(getattr(spec_config, "partial_spec_tokens", 20) or 20)
+            n = len(accept_lengths)
+            acceptance_rate_per_pos = [
+                (sum(1 for al in accept_lengths if int(al) >= pos) / n) if n > 0 else 0.0
+                for pos in range(K)
+            ]
         else:
             raise ValueError(f"Unknown method={method}")
 
@@ -388,6 +399,7 @@ def get_pred(
                     "gold": gold,
                     "evaluated": evaluated,
                     "correct": correct,
+                    "acceptance_rate_per_pos": acceptance_rate_per_pos,
                     "codeelo_submission": (
                         {
                             "prob": prob_id,
@@ -442,7 +454,7 @@ def ar_generate_transformers(*, model, tokenizer, input_ids, max_new_tokens: int
     return outputs
 
 
-def vanilla_speculative_decode(
+def vanilla_speculative_decode_local(
     *,
     target_model,
     draft_model,
@@ -595,6 +607,8 @@ def main() -> None:
     datasets = ["aime2025", "codeelo"] if args.dataset_name == "all" else [args.dataset_name]
 
     spec_config = SpecConfig()
+    # We do not use KV cache offload for these experiments.
+    spec_config.enable_offload = False
     if args.method == "full":
         spec_config.enable_partial_kv = False
     elif args.method == "specpv":

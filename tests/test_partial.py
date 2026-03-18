@@ -62,7 +62,7 @@ def main() -> None:
     input_ids = model_inputs["input_ids"]
 
     spec_config = SpecConfig(
-        enable_offload=True,
+        enable_offload=False,
         enable_partial_kv=True,
         n_retrieval_blocks=512,
         partial_spec_tokens=20,

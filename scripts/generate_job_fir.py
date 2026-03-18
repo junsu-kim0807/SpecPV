@@ -80,6 +80,7 @@ DRAFT_MODELS: list[ModelConfig] = [
 DATASETS: list[DatasetConfig] = [
     DatasetConfig(name="qmsum"),
     DatasetConfig(name="gov_report"),
+    DatasetConfig(name="longbench_v2"),
     DatasetConfig(name="aime2025"),
     DatasetConfig(name="codeelo"),
 ]
@@ -206,6 +207,8 @@ def build_python_command(
 ) -> str:
     if dataset.name in ("aime2025", "codeelo"):
         entry = "evaluation/eval_aime2025_codeelo.py"
+    elif dataset.name == "longbench_v2":
+        entry = "evaluation/longbenchv2_ar.py"
     else:
         entry = "evaluation/longbenchv1_summarization.py"
 
@@ -327,6 +330,9 @@ def main() -> None:
         for dataset in datasets:
             for draft in drafts:
                 for target in targets:
+                    if dataset.name == "longbench_v2" and method.name != "ar":
+                        # longbench_v2 in this repo matrix is `ar` only.
+                        continue
                     slug = pair_slug(draft, target)
                     path = JOBS_ROOT / method.name / dataset.name / f"{slug}.slurm"
                     text = render_job_script(
