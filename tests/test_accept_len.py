@@ -15,14 +15,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--base-model-path",
         type=str,
-        default=os.environ.get("SPECPV_BASE_MODEL_PATH", ""),
-        help="Base model path or HF repo id.",
+        default=os.environ.get("SPECPV_BASE_MODEL_PATH", "meta-llama/Llama-3.1-8B-Instruct"),
+        help="Target model path or HF repo id (base model).",
     )
     p.add_argument(
         "--ea-model-path",
         type=str,
-        default=os.environ.get("SPECPV_EA_MODEL_PATH", ""),
-        help="EAGLE draft model path or HF repo id.",
+        default=os.environ.get("SPECPV_EA_MODEL_PATH", "meta-llama/Llama-3.2-1B-Instruct"),
+        help="Draft model path or HF repo id (EAGLE adapter).",
     )
     p.add_argument(
         "--data_file",

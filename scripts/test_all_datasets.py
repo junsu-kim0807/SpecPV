@@ -25,8 +25,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--method",
         type=str,
-        default="naive",
-        choices=["specpv", "full", "naive"],
+        default="ar",
+        choices=["specpv", "full", "naive", "ar"],
         help="Generation method.",
     )
     p.add_argument("--datasets", nargs="*", default=["qmsum", "gov_report", "aime2025", "codeelo"])

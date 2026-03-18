@@ -14,14 +14,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--base-model-path",
         type=str,
-        default=os.environ.get("SPECPV_BASE_MODEL_PATH", ""),
-        help="Base model path or HF repo id.",
+        default=os.environ.get("SPECPV_BASE_MODEL_PATH", "meta-llama/Llama-3.1-8B-Instruct"),
+        help="Target model path or HF repo id (base model).",
     )
     p.add_argument(
         "--ea-model-path",
         type=str,
-        default=os.environ.get("SPECPV_EA_MODEL_PATH", ""),
-        help="EAGLE draft model path or HF repo id.",
+        default=os.environ.get("SPECPV_EA_MODEL_PATH", "meta-llama/Llama-3.2-1B-Instruct"),
+        help="Draft model path or HF repo id (EAGLE adapter).",
     )
     p.add_argument("--max_new_tokens", type=int, default=256)
     p.add_argument("--temperature", type=float, default=0.8)
@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if not args.base_model_path or not args.ea_model_path:
-        raise SystemExit("Set --base-model-path/--ea-model-path or env SPECPV_BASE_MODEL_PATH/SPECPV_EA_MODEL_PATH.")
+        raise SystemExit("Missing model paths. Set --base-model-path/--ea-model-path or env SPECPV_BASE_MODEL_PATH/SPECPV_EA_MODEL_PATH.")
 
     model = Speculator.from_pretrained(
         base_model_path=args.base_model_path,

@@ -21,12 +21,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--base-model-path",
         type=str,
-        default=os.environ.get("SPECPV_BASE_MODEL_PATH", ""),
+        default=os.environ.get("SPECPV_BASE_MODEL_PATH", "meta-llama/Llama-3.1-8B-Instruct"),
     )
     p.add_argument(
         "--ea-model-path",
         type=str,
-        default=os.environ.get("SPECPV_EA_MODEL_PATH", ""),
+        default=os.environ.get("SPECPV_EA_MODEL_PATH", "meta-llama/Llama-3.2-1B-Instruct"),
     )
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--samples_per_len", type=int, default=5)

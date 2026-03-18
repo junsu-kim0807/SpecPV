@@ -14,6 +14,8 @@ import torch.multiprocessing as mp
 from datasets import load_dataset
 from tqdm import tqdm
 
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from specpv import Speculator, SpecConfig
 
 
@@ -34,10 +36,16 @@ def parse_args(args=None):
         "--method",
         type=str,
         required=True,
-        choices=["specpv", "full", "naive"],
+        choices=["specpv", "full", "naive", "ar"],
     )
     parser.add_argument("--partial_length", type=str, default=None)
     parser.add_argument("--partial_spec_tokens", type=str, default="20")
+    parser.add_argument(
+        "--spec_k",
+        type=int,
+        default=8,
+        help="Vanilla speculative decoding: draft propose length K (used when --method=naive).",
+    )
 
     parser.add_argument(
         "--dataset_path",
@@ -130,10 +138,25 @@ def resolve_dataset_file(dataset_name: str, dataset_path: str | None, dataset_ro
     )
 
 
-def get_pred(rank, data, max_gen, prompt_format, dataset, model_path, draft_path, out_path, model_name, spec_config, method):
+def get_pred(
+    rank,
+    data,
+    max_gen,
+    prompt_format,
+    dataset,
+    model_path,
+    draft_path,
+    out_path,
+    model_name,
+    spec_config,
+    method,
+    spec_k: int,
+):
     device = torch.device(f"cuda:{rank}")
     max_length = 60000
-    model, tokenizer = load_model_and_tokenizer(model_path, draft_path, device)
+    target_model, draft_model, tokenizer = load_models_and_tokenizer(
+        model_path, draft_path, device, method=method
+    )
 
     for json_obj in tqdm(data, desc=f"rank{rank}"):
         prompt = prompt_format.format(**json_obj)
@@ -150,20 +173,34 @@ def get_pred(rank, data, max_gen, prompt_format, dataset, model_path, draft_path
 
         model_inputs = tokenizer([prompt], return_tensors="pt").to(device)
         context_length = model_inputs.input_ids.shape[-1]
-        is_llama3 = "llama3" in model_name
+        # model_name is typically a basename like "Llama-3.1-8B-Instruct" (not "llama3"),
+        # so detect both variants.
+        is_llama3 = ("llama3" in model_name) or ("llama-3" in model_name) or ("llama_3" in model_name)
 
-        if method == "naive":
-            output, metrics = model.naive_generate(
+        if method == "ar":
+            output, metrics = ar_generate_transformers(
+                model=target_model,
+                tokenizer=tokenizer,
                 input_ids=model_inputs.input_ids,
                 max_new_tokens=max_gen,
                 max_length=context_length + max_gen + 100,
-                temperature=0.0,
                 is_llama3=is_llama3,
-                log=True,
             )
-            metrics["avg_accept_length"] = 0
+        elif method == "naive":
+            if draft_model is None:
+                raise RuntimeError("method=naive requires draft_model.")
+            output, metrics = vanilla_speculative_decode(
+                target_model=target_model,
+                draft_model=draft_model,
+                tokenizer=tokenizer,
+                input_ids=model_inputs.input_ids,
+                max_new_tokens=max_gen,
+                max_length=context_length + max_gen + 100,
+                is_llama3=is_llama3,
+                spec_k=spec_k,
+            )
         else:
-            output, metrics = model.spec_generate(
+            output, metrics = target_model.spec_generate(
                 input_ids=model_inputs.input_ids,
                 max_new_tokens=max_gen,
                 max_length=context_length + max_gen + 100,
@@ -207,8 +244,203 @@ def seed_everything(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def load_model_and_tokenizer(model_path, draft_path, device):
-    model = Speculator.from_pretrained(
+def ar_generate_transformers(*, model, tokenizer, input_ids, max_new_tokens: int, max_length: int, is_llama3: bool):
+    """
+    Transformers-based greedy decoding for `method=naive`.
+    This path intentionally does NOT require Eagle draft adapters.
+    """
+    import time
+
+    start_time = time.time()
+
+    # Stop conditions: llama3 uses special <|eot_id|> token, otherwise rely on eos_token_id.
+    eos_ids: list[int] | None
+    if is_llama3:
+        eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        eos_ids = [eot_id]
+        if tokenizer.eos_token_id is not None and tokenizer.eos_token_id not in eos_ids:
+            eos_ids.append(tokenizer.eos_token_id)
+    else:
+        eos_ids = [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else None
+
+    attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+    gen_kwargs: dict[str, object] = {
+        "max_new_tokens": int(max_new_tokens),
+        "max_length": int(max_length),
+        "do_sample": False,
+        "temperature": 0.0,
+        "use_cache": True,
+        "attention_mask": attention_mask,
+    }
+    if eos_ids:
+        gen_kwargs["eos_token_id"] = eos_ids if len(eos_ids) > 1 else eos_ids[0]
+    if tokenizer.pad_token_id is not None:
+        gen_kwargs["pad_token_id"] = tokenizer.pad_token_id
+    else:
+        gen_kwargs["pad_token_id"] = tokenizer.eos_token_id
+
+    outputs = model.generate(input_ids=input_ids, **gen_kwargs)
+
+    total_time = time.time() - start_time
+    new_token = outputs.shape[-1] - input_ids.shape[-1]
+    throughput = (new_token / total_time) if total_time > 0 else 0.0
+
+    return outputs, {
+        "avg_accept_length": 0,
+        "new_token": int(new_token),
+        "total_time": float(total_time),
+        "throughput": float(throughput),
+    }
+
+
+def vanilla_speculative_decode(
+    *,
+    target_model,
+    draft_model,
+    tokenizer,
+    input_ids: torch.Tensor,
+    max_new_tokens: int,
+    max_length: int,
+    is_llama3: bool,
+    spec_k: int = 8,
+):
+    """
+    Vanilla speculative decoding (accept/reject) using generic HF causal LMs.
+    This does not use Eagle adapters; it only needs target_model + draft_model.
+    """
+    import time
+
+    start_time = time.time()
+    device = input_ids.device
+
+    prompt_len = input_ids.shape[1]
+    output_ids = input_ids.clone()
+
+    # Stop ids
+    stop_ids: list[int] = []
+    if is_llama3:
+        eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        stop_ids.append(eot_id)
+    if tokenizer.eos_token_id is not None:
+        stop_ids.append(int(tokenizer.eos_token_id))
+    stop_ids = sorted(set(stop_ids))
+
+    generated = 0
+    while generated < max_new_tokens and output_ids.shape[1] < max_length:
+        # 1) Draft propose K tokens greedily
+        base_ids = output_ids
+        temp_ids = output_ids
+        proposed: list[int] = []
+        q_token_probs: list[float] = []
+
+        with torch.no_grad():
+            for _ in range(spec_k):
+                if temp_ids.shape[1] >= max_length:
+                    break
+                draft_out = draft_model(input_ids=temp_ids)
+                next_logits = draft_out.logits[:, -1, :]
+                q_probs = torch.softmax(next_logits, dim=-1)
+                next_token = torch.argmax(q_probs, dim=-1, keepdim=True)  # [1,1]
+                tok = int(next_token.item())
+                proposed.append(tok)
+                q_token_probs.append(float(q_probs[0, tok].item()))
+                temp_ids = torch.cat([temp_ids, next_token], dim=1)
+
+        if not proposed:
+            break
+
+        proposed_ids = torch.tensor(proposed, device=device, dtype=torch.long).unsqueeze(0)  # [1,K]
+        verify_ids = torch.cat([base_ids, proposed_ids], dim=1)
+
+        # 2) Verify using target model logits for each proposed token position
+        with torch.no_grad():
+            target_out = target_model(input_ids=verify_ids)
+            target_logits = target_out.logits  # [1, L+K, vocab]
+
+            stop_reached = False
+            for i, tok in enumerate(proposed):
+                if generated >= max_new_tokens or output_ids.shape[1] >= max_length:
+                    break
+
+                pos = base_ids.shape[1] + i - 1  # predicts token at base_len + i
+                p_logits = target_logits[:, pos, :]
+                p_probs = torch.softmax(p_logits, dim=-1)
+                p_tok_prob = float(p_probs[0, tok].item())
+                q_tok_prob = q_token_probs[i]
+
+                # Acceptance probability a = min(1, p/q)
+                if q_tok_prob <= 0:
+                    a = 1.0
+                else:
+                    a = min(1.0, p_tok_prob / q_tok_prob)
+
+                if float(torch.rand(1).item()) <= a:
+                    # accept proposed token
+                    next_token_tensor = torch.tensor([[tok]], device=device, dtype=torch.long)
+                    output_ids = torch.cat([output_ids, next_token_tensor], dim=1)
+                    generated += 1
+                    if tok in stop_ids:
+                        stop_reached = True
+                        break
+                else:
+                    # reject: sample next token from target distribution (deterministic argmax)
+                    next_token = torch.argmax(p_probs, dim=-1, keepdim=True)  # [1,1]
+                    next_tok = int(next_token.item())
+                    output_ids = torch.cat([output_ids, next_token], dim=1)
+                    generated += 1
+                    if next_tok in stop_ids:
+                        stop_reached = True
+                        break
+                    break
+
+            # If the model rejected early, loop continues from new output_ids state.
+            if stop_reached:
+                break
+
+    total_time = time.time() - start_time
+    new_token = output_ids.shape[-1] - prompt_len
+    throughput = (new_token / total_time) if total_time > 0 else 0.0
+
+    return output_ids, {
+        "avg_accept_length": 0,
+        "new_token": int(new_token),
+        "total_time": float(total_time),
+        "throughput": float(throughput),
+    }
+
+
+
+def load_models_and_tokenizer(model_path, draft_path, device, *, method: str):
+    """
+    Returns (target_model, draft_model, tokenizer).
+    - method=ar: draft_model=None
+    - method=naive: draft_model is required (vanilla speculative decoding)
+    - method=specpv/full: draft_model is None; target_model is a Speculator
+    """
+    if method in ("ar", "naive"):
+        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+        target_model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            device_map={"": str(device)},
+        )
+        target_model.eval()
+
+        if method == "ar":
+            return target_model, None, tokenizer
+
+        draft_model = AutoModelForCausalLM.from_pretrained(
+            draft_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            device_map={"": str(device)},
+        )
+        draft_model.eval()
+        return target_model, draft_model, tokenizer
+
+    # specpv/full: require Eagle3 draft adapter.
+    spec_model = Speculator.from_pretrained(
         base_model_path=model_path,
         ea_model_path=draft_path,
         dtype=torch.bfloat16,
@@ -216,9 +448,9 @@ def load_model_and_tokenizer(model_path, draft_path, device):
         device_map=device,
         total_token=-1,
     )
-    model.eval()
-    tokenizer = model.tokenizer
-    return model, tokenizer
+    spec_model.eval()
+    tokenizer = spec_model.tokenizer
+    return spec_model, None, tokenizer
 
 
 if __name__ == "__main__":
@@ -295,6 +527,7 @@ if __name__ == "__main__":
                     model_name,
                     spec_config,
                     args.method,
+                    args.spec_k,
                 ),
             )
             p.start()

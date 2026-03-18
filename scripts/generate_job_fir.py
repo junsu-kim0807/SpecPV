@@ -86,6 +86,7 @@ DATASETS: list[DatasetConfig] = [
 
 METHODS: list[MethodConfig] = [
     MethodConfig(name="full"),
+    MethodConfig(name="ar"),
     MethodConfig(name="naive"),
     MethodConfig(
         name="specpv",

@@ -15,6 +15,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from datasets import load_dataset
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from specpv import SpecConfig, Speculator
 
@@ -35,7 +36,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         "--method",
         type=str,
         required=True,
-        choices=["specpv", "full", "naive"],
+        choices=["specpv", "full", "naive", "ar"],
     )
     p.add_argument("--partial_length", type=str, default=None)
     p.add_argument("--partial_spec_tokens", type=str, default="20")
@@ -58,6 +59,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max_samples", type=int, default=None)
     p.add_argument("--max_new_tokens", type=int, default=256)
     p.add_argument("--max_input_tokens", type=int, default=60000)
+    p.add_argument(
+        "--spec_k",
+        type=int,
+        default=8,
+        help="Vanilla speculative decoding: draft propose length K (used when --method=naive).",
+    )
     return p.parse_args(args)
 
 
@@ -278,9 +285,12 @@ def get_pred(
     model_name: str,
     spec_config: SpecConfig,
     method: str,
+    spec_k: int,
 ) -> None:
     device = torch.device(f"cuda:{rank}")
-    model, tokenizer = load_model_and_tokenizer(model_path, draft_path, device)
+    target_model, draft_model, tokenizer = load_models_and_tokenizer(
+        model_path, draft_path, device, method=method
+    )
 
     for json_obj in tqdm(data, desc=f"{dataset_name}/rank{rank}"):
         user_prompt, system_prompt = build_user_prompt(dataset_name, json_obj)
@@ -305,19 +315,33 @@ def get_pred(
 
         model_inputs = tokenizer([prompt], return_tensors="pt").to(device)
         context_length = model_inputs.input_ids.shape[-1]
-        is_llama3 = "llama3" in model_name
+        is_llama3 = ("llama3" in model_name) or ("llama-3" in model_name) or ("llama_3" in model_name)
 
-        if method == "naive":
-            output, _metrics = model.naive_generate(
+        if method == "ar":
+            output = ar_generate_transformers(
+                model=target_model,
+                tokenizer=tokenizer,
                 input_ids=model_inputs.input_ids,
                 max_new_tokens=max_gen,
                 max_length=context_length + max_gen + 100,
-                temperature=0.0,
                 is_llama3=is_llama3,
-                log=True,
             )
-        else:
-            output, _metrics = model.spec_generate(
+        elif method == "naive":
+            if draft_model is None:
+                raise RuntimeError("method=naive requires draft_model.")
+            output = vanilla_speculative_decode(
+                target_model=target_model,
+                draft_model=draft_model,
+                tokenizer=tokenizer,
+                input_ids=model_inputs.input_ids,
+                max_new_tokens=max_gen,
+                max_length=context_length + max_gen + 100,
+                is_llama3=is_llama3,
+                spec_k=spec_k,
+            )
+        elif method in ("specpv", "full"):
+            # specpv/full: require Speculator (Eagle draft adapters).
+            output, _metrics = target_model.spec_generate(
                 input_ids=model_inputs.input_ids,
                 max_new_tokens=max_gen,
                 max_length=context_length + max_gen + 100,
@@ -326,6 +350,8 @@ def get_pred(
                 spec_config=spec_config,
                 log=True,
             )
+        else:
+            raise ValueError(f"Unknown method={method}")
 
         pred_raw = tokenizer.decode(output[0][context_length:], skip_special_tokens=True)
         gold = get_gold_answer(dataset_name, json_obj)
@@ -382,8 +408,168 @@ def get_pred(
         dist.destroy_process_group()
 
 
-def load_model_and_tokenizer(model_path: str, draft_path: str, device: torch.device):
-    model = Speculator.from_pretrained(
+def ar_generate_transformers(*, model, tokenizer, input_ids, max_new_tokens: int, max_length: int, is_llama3: bool):
+    import time
+
+    # Greedy decoding only (matches temperature=0 behaviour).
+    eos_ids: list[int] | None
+    if is_llama3:
+        eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        eos_ids = [eot_id]
+        if tokenizer.eos_token_id is not None and tokenizer.eos_token_id not in eos_ids:
+            eos_ids.append(tokenizer.eos_token_id)
+    else:
+        eos_ids = [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else None
+
+    attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+    gen_kwargs: dict[str, object] = {
+        "max_new_tokens": int(max_new_tokens),
+        "max_length": int(max_length),
+        "do_sample": False,
+        "temperature": 0.0,
+        "use_cache": True,
+        "attention_mask": attention_mask,
+    }
+    if eos_ids:
+        gen_kwargs["eos_token_id"] = eos_ids if len(eos_ids) > 1 else eos_ids[0]
+    if tokenizer.pad_token_id is not None:
+        gen_kwargs["pad_token_id"] = tokenizer.pad_token_id
+    else:
+        gen_kwargs["pad_token_id"] = tokenizer.eos_token_id
+
+    _start = time.time()
+    outputs = model.generate(input_ids=input_ids, **gen_kwargs)
+    return outputs
+
+
+def vanilla_speculative_decode(
+    *,
+    target_model,
+    draft_model,
+    tokenizer,
+    input_ids: torch.Tensor,
+    max_new_tokens: int,
+    max_length: int,
+    is_llama3: bool,
+    spec_k: int = 8,
+):
+    """
+    Vanilla speculative decoding (accept/reject) using generic HF causal LMs.
+    Returns the full generated token ids tensor (prompt + generated).
+    """
+    import time
+
+    start_time = time.time()
+    device = input_ids.device
+    prompt_len = input_ids.shape[1]
+    output_ids = input_ids.clone()
+
+    stop_ids: list[int] = []
+    if is_llama3:
+        eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        stop_ids.append(eot_id)
+    if tokenizer.eos_token_id is not None:
+        stop_ids.append(int(tokenizer.eos_token_id))
+    stop_ids = sorted(set(stop_ids))
+
+    generated = 0
+    while generated < max_new_tokens and output_ids.shape[1] < max_length:
+        base_ids = output_ids
+        temp_ids = output_ids
+        proposed: list[int] = []
+        q_token_probs: list[float] = []
+
+        with torch.no_grad():
+            for _ in range(spec_k):
+                if temp_ids.shape[1] >= max_length:
+                    break
+                draft_out = draft_model(input_ids=temp_ids)
+                next_logits = draft_out.logits[:, -1, :]
+                q_probs = torch.softmax(next_logits, dim=-1)
+                next_token = torch.argmax(q_probs, dim=-1, keepdim=True)  # [1,1]
+                tok = int(next_token.item())
+                proposed.append(tok)
+                q_token_probs.append(float(q_probs[0, tok].item()))
+                temp_ids = torch.cat([temp_ids, next_token], dim=1)
+
+        if not proposed:
+            break
+
+        proposed_ids = torch.tensor(proposed, device=device, dtype=torch.long).unsqueeze(0)  # [1,K]
+        verify_ids = torch.cat([base_ids, proposed_ids], dim=1)
+
+        with torch.no_grad():
+            target_out = target_model(input_ids=verify_ids)
+            target_logits = target_out.logits  # [1, L+K, vocab]
+
+            stop_reached = False
+            for i, tok in enumerate(proposed):
+                if generated >= max_new_tokens or output_ids.shape[1] >= max_length:
+                    break
+
+                pos = base_ids.shape[1] + i - 1
+                p_logits = target_logits[:, pos, :]
+                p_probs = torch.softmax(p_logits, dim=-1)
+                p_tok_prob = float(p_probs[0, tok].item())
+                q_tok_prob = q_token_probs[i]
+
+                if q_tok_prob <= 0:
+                    a = 1.0
+                else:
+                    a = min(1.0, p_tok_prob / q_tok_prob)
+
+                if float(torch.rand(1).item()) <= a:
+                    next_token_tensor = torch.tensor([[tok]], device=device, dtype=torch.long)
+                    output_ids = torch.cat([output_ids, next_token_tensor], dim=1)
+                    generated += 1
+                    if tok in stop_ids:
+                        stop_reached = True
+                        break
+                else:
+                    next_token = torch.argmax(p_probs, dim=-1, keepdim=True)  # [1,1]
+                    next_tok = int(next_token.item())
+                    output_ids = torch.cat([output_ids, next_token], dim=1)
+                    generated += 1
+                    if next_tok in stop_ids:
+                        stop_reached = True
+                    break
+
+            if stop_reached:
+                break
+
+    _ = time.time() - start_time
+    return output_ids
+
+
+def load_models_and_tokenizer(
+    model_path: str, draft_path: str, device: torch.device, *, method: str
+) -> tuple[Any, Any | None, Any]:
+    """
+    Returns (target_model, draft_model, tokenizer)
+    """
+    if method in ("ar", "naive"):
+        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+        target_model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            device_map={"": str(device)},
+        )
+        target_model.eval()
+        if method == "ar":
+            return target_model, None, tokenizer
+
+        draft_model = AutoModelForCausalLM.from_pretrained(
+            draft_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            device_map={"": str(device)},
+        )
+        draft_model.eval()
+        return target_model, draft_model, tokenizer
+
+    # specpv/full: require Speculator (Eagle draft adapters).
+    spec_model = Speculator.from_pretrained(
         base_model_path=model_path,
         ea_model_path=draft_path,
         dtype=torch.bfloat16,
@@ -391,9 +577,9 @@ def load_model_and_tokenizer(model_path: str, draft_path: str, device: torch.dev
         device_map=device,
         total_token=-1,
     )
-    model.eval()
-    tokenizer = model.tokenizer
-    return model, tokenizer
+    spec_model.eval()
+    tokenizer = spec_model.tokenizer
+    return spec_model, None, tokenizer
 
 
 def main() -> None:
@@ -463,6 +649,7 @@ def main() -> None:
                     model_name,
                     spec_config,
                     args.method,
+                    args.spec_k,
                 ),
             )
             p.start()
